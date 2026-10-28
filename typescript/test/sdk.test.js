@@ -244,19 +244,19 @@ test("CLI --init writes /ml-memory MCP config to Cursor and Windsurf (including 
         const cursorCfg = JSON.parse(
           fs.readFileSync(path.join(tmpHome, ".cursor", "mcp.json"), "utf8")
         );
-        assert.ok(cursorCfg.mcpServers["/ml-memory"]);
-        assert.equal(cursorCfg.mcpServers["/ml-memory"].env.SLASHML_API_KEY, "sml_init_test");
-        assert.deepEqual(cursorCfg.mcpServers["/ml-memory"].args, ["-y", "@slashml/mcp", "--workspace", "/workspace/demo"]);
+        assert.ok(cursorCfg.mcpServers["ml-memory"]);
+        assert.equal(cursorCfg.mcpServers["ml-memory"].env.SLASHML_API_KEY, "sml_init_test");
+        assert.deepEqual(cursorCfg.mcpServers["ml-memory"].args, ["-y", "@slashml/mcp", "--workspace", "/workspace/demo"]);
 
         const windsurfCfg = JSON.parse(
           fs.readFileSync(path.join(tmpHome, ".codeium", "windsurf", "mcp_config.json"), "utf8")
         );
-        assert.ok(windsurfCfg.mcpServers["/ml-memory"]);
+        assert.ok(windsurfCfg.mcpServers["ml-memory"]);
 
         const claudeMcpCfg = JSON.parse(
           fs.readFileSync(path.join(tmpHome, ".mcp.json"), "utf8")
         );
-        assert.ok(claudeMcpCfg.mcpServers["/ml-memory"]);
+        assert.ok(claudeMcpCfg.mcpServers["ml-memory"]);
         resolve();
       } catch (e) {
         reject(e);
@@ -311,7 +311,17 @@ test("SDK recall({ query, userId, topK }) and CLI --signup / --verify onboarding
     assert.equal(requests[1].body.query, "Second recall query");
     assert.equal(requests[1].body.limit, 3);
 
-    // 2. Test CLI --signup
+    // 2. Test CLI --help and --version (must exit 0 immediately without hanging)
+    const helpOut = await new Promise((resolve, reject) => {
+      let stdout = "";
+      const proc = spawn(process.execPath, [cliPath, "--help"], { cwd: tmpDir, stdio: "pipe" });
+      proc.stdout.on("data", (c) => (stdout += c.toString("utf8")));
+      proc.on("error", reject);
+      proc.on("exit", (code) => (code === 0 ? resolve(stdout) : reject(new Error(`help exit ${code}`))));
+    });
+    assert.match(helpOut, /claude mcp add --scope user ml-memory/);
+
+    // 3. Test CLI --signup
     await new Promise((resolve, reject) => {
       const proc = spawn(
         process.execPath,
@@ -324,7 +334,20 @@ test("SDK recall({ query, userId, topK }) and CLI --signup / --verify onboarding
     assert.equal(requests[2].url, "/api/auth/magic-link/request");
     assert.equal(requests[2].body.email, "founder@slashml.ai");
 
-    // 3. Test CLI --verify <email> <code> --init
+    // 4. Test CLI --verify WITHOUT --init (must NOT write .env or .cursor/mcp.json)
+    await new Promise((resolve, reject) => {
+      const proc = spawn(
+        process.execPath,
+        [cliPath, "--verify", "founder@slashml.ai", "654321", "--console-url", mock.baseUrl],
+        { cwd: tmpDir, env: { ...process.env, HOME: tmpDir }, stdio: "pipe" }
+      );
+      proc.on("error", reject);
+      proc.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`verify plain exit ${code}`))));
+    });
+    assert.equal(fs.existsSync(path.join(tmpDir, ".env")), false);
+    assert.equal(fs.existsSync(path.join(tmpDir, ".cursor", "mcp.json")), false);
+
+    // 5. Test CLI --verify <email> <code> --init
     await new Promise((resolve, reject) => {
       const proc = spawn(
         process.execPath,
@@ -334,10 +357,10 @@ test("SDK recall({ query, userId, topK }) and CLI --signup / --verify onboarding
       proc.on("error", reject);
       proc.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`verify exit ${code}`))));
     });
-    assert.equal(requests[3].url, "/api/auth/magic-link/verify");
-    assert.equal(requests[3].body.email, "founder@slashml.ai");
-    assert.equal(requests[3].body.otp_code, "654321");
-    assert.equal(requests[3].body.issue_cli_key, true);
+    assert.equal(requests[4].url, "/api/auth/magic-link/verify");
+    assert.equal(requests[4].body.email, "founder@slashml.ai");
+    assert.equal(requests[4].body.otp_code, "654321");
+    assert.equal(requests[4].body.issue_cli_key, true);
 
     const envContent = fs.readFileSync(path.join(tmpDir, ".env"), "utf8");
     assert.match(envContent, /SLASHML_API_KEY=sml_live_verified_onboard_key_99/);
@@ -345,7 +368,7 @@ test("SDK recall({ query, userId, topK }) and CLI --signup / --verify onboarding
     assert.match(gitignoreContent, /\.env/);
     const cursorCfg = JSON.parse(fs.readFileSync(path.join(tmpDir, ".cursor", "mcp.json"), "utf8"));
     assert.equal(
-      cursorCfg.mcpServers["/ml-memory"].env.SLASHML_API_KEY,
+      cursorCfg.mcpServers["ml-memory"].env.SLASHML_API_KEY,
       "sml_live_verified_onboard_key_99"
     );
   } finally {
@@ -572,7 +595,7 @@ test("E2E Node MCP Server (@slashml/mcp and @slashml/memory bin): all 7 tools + 
       );
 
       assert.equal(responses.length, 11);
-      assert.equal(responses[0].result.serverInfo.name, "/ml-memory");
+      assert.equal(responses[0].result.serverInfo.name, "ml-memory");
       assert.deepEqual(responses[1].result, {});
       assert.equal(responses[2].result.tools.length, 7);
 

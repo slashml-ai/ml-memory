@@ -45,5 +45,5 @@ const results = await memory.search("How does auth work?", { userId: "team_backe
 ### 3. Local MCP Server (`npx -y @slashml/mcp`)
 
 ```bash
-claude mcp add /ml-memory -- env SLASHML_API_KEY=sml_live_xxx npx -y @slashml/mcp
+claude mcp add --scope user ml-memory -- env SLASHML_API_KEY=sml_live_xxx npx -y @slashml/mcp
 ```

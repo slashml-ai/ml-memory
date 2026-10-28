@@ -6,14 +6,14 @@ Official Model Context Protocol (MCP) server for **SlashML (`/` `ml`)**. Connect
 
 ### Claude Code (1-liner)
 ```bash
-claude mcp add /ml-memory -- env SLASHML_API_KEY=sml_live_xxx npx -y @slashml/mcp
+claude mcp add --scope user ml-memory -- env SLASHML_API_KEY=sml_live_xxx npx -y @slashml/mcp
 ```
 
 ### Cursor / Claude Desktop / Windsurf (`mcp.json`)
 ```json
 {
   "mcpServers": {
-    "/ml-memory": {
+    "ml-memory": {
       "command": "npx",
       "args": ["-y", "@slashml/mcp"],
       "env": {
@@ -27,7 +27,7 @@ claude mcp add /ml-memory -- env SLASHML_API_KEY=sml_live_xxx npx -y @slashml/mc
 ### Code Mode (91% Token Savings)
 Expose a single `execute_memory_code` meta-tool instead of all 7 tool schemas:
 ```bash
-claude mcp add /ml-memory-code -- env SLASHML_API_KEY=sml_live_xxx npx -y @slashml/mcp --code-mode
+claude mcp add --scope user ml-memory-code -- env SLASHML_API_KEY=sml_live_xxx npx -y @slashml/mcp --code-mode
 ```
 
 ## Available Tools (Standard Mode)

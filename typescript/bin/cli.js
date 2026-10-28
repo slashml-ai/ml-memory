@@ -10,8 +10,38 @@ const readline = require("readline");
 
 const DEFAULT_BASE_URL = "https://api.slashml.ai";
 const DEFAULT_CONSOLE_URL = "https://app.slashml.ai";
+const PACKAGE_VERSION = "1.0.1";
+
+function printHelp() {
+  console.log(`@slashml/memory v${PACKAGE_VERSION} — Official CLI & MCP Stdio Server for / ml (SlashML · https://slashml.ai)
+Publisher: SlashML / FractionML (slashml.ai · fractionml.com)
+
+Usage:
+  npx -y @slashml/memory [options]
+
+When invoked without CLI flags, starts the JSON-RPC 2.0 MCP server over stdio.
+
+Claude Code Registration (User Scope):
+  claude mcp add --scope user ml-memory -e SLASHML_API_KEY="$SLASHML_API_KEY" -- npx -y @slashml/memory
+
+Options:
+  -h, --help                     Show this help message and exit
+  -v, --version                  Print package version and exit
+  --api-key <key>                SlashML API key (or set SLASHML_API_KEY env var)
+  --workspace, --repo <path>     Optional workspace directory to scope/index (defaults to process.cwd() at runtime)
+  --user-id <id>                 Default user/workspace namespace (default: SLASHML_USER_ID or "default")
+  --code-only                    Expose only code & bug-localization MCP tools
+  --code-mode                    Expose compact single meta-tool (execute_memory_code)
+  --init                         Write ml-memory MCP entry to Cursor, Windsurf, or .mcp.json
+  --skill <name>                 Filter IDE config target during --init (default: ml-memory)
+  --write-env                    Save SLASHML_API_KEY to .env in the current directory
+  --signup <email>               Request a 6-digit email verification code to provision a free API key
+  --verify <email> <code>        Verify 6-digit code and print the new SLASHML_API_KEY to stdout`);
+}
 
 function parseCliArgs(argv) {
+  let isHelp = false;
+  let isVersion = false;
   let isInit = false;
   let skill = null;
   let apiKey = process.env.SLASHML_API_KEY || null;
@@ -28,7 +58,11 @@ function parseCliArgs(argv) {
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "init" || arg === "--init") {
+    if (arg === "-h" || arg === "--help" || arg === "help") {
+      isHelp = true;
+    } else if (arg === "-v" || arg === "--version" || arg === "version") {
+      isVersion = true;
+    } else if (arg === "init" || arg === "--init") {
       isInit = true;
     } else if (arg === "--skill" && i + 1 < argv.length) {
       skill = argv[++i];
@@ -60,6 +94,8 @@ function parseCliArgs(argv) {
     }
   }
   return {
+    isHelp,
+    isVersion,
     isInit,
     skill,
     apiKey,
@@ -164,9 +200,10 @@ function nativeNodeInit(skill, apiKey, repo = null, writeEnv = false) {
     if (!data.mcpServers || typeof data.mcpServers !== "object") {
       data.mcpServers = {};
     }
-    data.mcpServers["/ml-memory"] = serverEntry;
+    delete data.mcpServers["/ml-memory"];
+    data.mcpServers["ml-memory"] = serverEntry;
     fs.writeFileSync(target, JSON.stringify(data, null, 2) + "\n", "utf8");
-    console.log(`Configured /ml-memory MCP in ${target}`);
+    console.log(`Configured ml-memory MCP in ${target}`);
   }
 }
 
@@ -175,7 +212,7 @@ async function runCliSignup(email, consoleUrl) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "User-Agent": "slashml-cli-node/1.0.0",
+      "User-Agent": `slashml-cli-node/${PACKAGE_VERSION}`,
     },
     body: JSON.stringify({ email: email.trim(), source: "cli" }),
   });
@@ -193,7 +230,7 @@ async function runCliSignup(email, consoleUrl) {
     JSON.stringify({
       status: "verification_code_sent",
       email: email.trim(),
-      message: `A 6-digit verification code has been sent to ${email.trim()}. Ask the user for the 6-digit code and run: npx -y @slashml/memory --verify ${email.trim()} <6-digit-code> --init`,
+      message: `A 6-digit verification code has been sent to ${email.trim()}. Ask the user for the 6-digit code and run: npx -y @slashml/memory --verify ${email.trim()} <6-digit-code>`,
       ...(data.dev_otp_code ? { dev_otp_code: data.dev_otp_code } : {}),
     })
   );
@@ -201,13 +238,13 @@ async function runCliSignup(email, consoleUrl) {
 
 async function runCliVerify(email, code, parsedArgs) {
   if (!code) {
-    throw new Error("Missing 6-digit verification code. Usage: npx -y @slashml/memory --verify <email> <6-digit-code> --init");
+    throw new Error("Missing 6-digit verification code. Usage: npx -y @slashml/memory --verify <email> <6-digit-code>");
   }
   const res = await fetch(`${parsedArgs.consoleUrl}/api/auth/magic-link/verify`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "User-Agent": "slashml-cli-node/1.0.0",
+      "User-Agent": `slashml-cli-node/${PACKAGE_VERSION}`,
     },
     body: JSON.stringify({
       email: email.trim(),
@@ -233,20 +270,36 @@ async function runCliVerify(email, code, parsedArgs) {
         "Account verified, but no new API key was returned. Create a key at https://app.slashml.ai and set SLASHML_API_KEY."
     );
   }
-  saveApiKeyToEnvFile(provisionedKey, process.cwd());
-  nativeNodeInit(parsedArgs.skill, provisionedKey, parsedArgs.repo, false);
+  let envSavedPath = null;
+  if (parsedArgs.writeEnv || parsedArgs.isInit) {
+    saveApiKeyToEnvFile(provisionedKey, process.cwd());
+    envSavedPath = path.join(process.cwd(), ".env");
+  }
+  if (parsedArgs.isInit) {
+    nativeNodeInit(parsedArgs.skill, provisionedKey, parsedArgs.repo, false);
+  }
   console.log(
     JSON.stringify({
       status: "authenticated",
       email: email.trim(),
       api_key: provisionedKey,
-      env_saved: path.join(process.cwd(), ".env"),
-      mcp_server: "/ml-memory",
+      ...(envSavedPath ? { env_saved: envSavedPath } : {}),
+      mcp_server: "ml-memory",
     })
   );
 }
 
 const parsed = parseCliArgs(process.argv.slice(2));
+
+if (parsed.isHelp) {
+  printHelp();
+  process.exit(0);
+}
+
+if (parsed.isVersion) {
+  console.log(PACKAGE_VERSION);
+  process.exit(0);
+}
 
 if (parsed.signupEmail) {
   runCliSignup(parsed.signupEmail, parsed.consoleUrl)
@@ -532,7 +585,7 @@ rl.on("line", (line) => {
             id,
             result: {
               protocolVersion: "2024-11-05",
-              serverInfo: { name: "/ml-memory", version: "1.0.0" },
+              serverInfo: { name: "ml-memory", version: PACKAGE_VERSION },
               capabilities: { tools: {} },
             },
           }) + "\n"

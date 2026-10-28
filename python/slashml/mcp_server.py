@@ -108,9 +108,10 @@ def configure_mcp_targets(
                 data = {}
         if not isinstance(data.get("mcpServers"), dict):
             data["mcpServers"] = {}
-        data["mcpServers"]["/ml-memory"] = server_entry
+        data["mcpServers"].pop("/ml-memory", None)
+        data["mcpServers"]["ml-memory"] = server_entry
         target.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        print(f"Configured /ml-memory MCP in {target}")
+        print(f"Configured ml-memory MCP in {target}")
         written.append(str(target))
     return written
 
@@ -387,7 +388,7 @@ class SlashMLMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": "/ml-memory", "version": "1.0.0"},
+                    "serverInfo": {"name": "ml-memory", "version": "1.0.1"},
                     "capabilities": {"tools": {}},
                 },
             }
@@ -442,7 +443,8 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(prog="slashml-mcp")
     parser.add_argument("command", nargs="?", default=None, help="Optional command (e.g. 'init')")
-    parser.add_argument("--init", action="store_true", help="Configure /ml-memory MCP in IDE configs")
+    parser.add_argument("-v", "--version", action="version", version="1.0.1")
+    parser.add_argument("--init", action="store_true", help="Configure ml-memory MCP in IDE configs")
     parser.add_argument("--skill", default=None, help="Skill or IDE target filter (e.g. ml-memory, cursor)")
     parser.add_argument("--api-key", default=None, help="SlashML Cloud API key (or SLASHML_API_KEY)")
     parser.add_argument("--base-url", default=None, help="SlashML Cloud base URL")
@@ -456,7 +458,7 @@ def main(
     parser.add_argument("--signup", default=None, metavar="EMAIL", help="Request a 6-digit verification code via email")
     parser.add_argument("--verify", nargs="+", default=None, metavar=("EMAIL", "CODE"), help="Verify email and 6-digit code to provision SLASHML_API_KEY")
     parser.add_argument("--code", default=None, help="6-digit verification code (optional alternative to positional arg)")
-    parser.add_argument("--write-env", action="store_true", help="Write SLASHML_API_KEY to .env during --init")
+    parser.add_argument("--write-env", action="store_true", help="Write SLASHML_API_KEY to .env")
     parser.add_argument("--code-only", action="store_true", default=code_only_default)
     parser.add_argument("--code-mode", action="store_true", default=code_mode_default)
     args = parser.parse_args(argv)
@@ -469,7 +471,7 @@ def main(
             "email": email,
             "message": (
                 f"A 6-digit verification code has been sent to {email}. "
-                f"Ask the user for the 6-digit code and run: slashml-mcp --verify {email} <6-digit-code> --init"
+                f"Ask the user for the 6-digit code and run: slashml-mcp --verify {email} <6-digit-code>"
             ),
         }
         if data.get("dev_otp_code"):
@@ -481,7 +483,7 @@ def main(
         email = args.verify[0].strip()
         code = args.verify[1].strip() if len(args.verify) > 1 else (args.code or "").strip()
         if not code:
-            raise SystemExit("Error: Missing 6-digit verification code. Usage: slashml-mcp --verify <email> <6-digit-code> --init")
+            raise SystemExit("Error: Missing 6-digit verification code. Usage: slashml-mcp --verify <email> <6-digit-code>")
         data = _console_post(
             args.console_url,
             "/api/auth/magic-link/verify",
@@ -490,19 +492,20 @@ def main(
         provisioned_key = data.get("initial_api_key") or data.get("api_key") or data.get("apiKey")
         if not provisioned_key:
             raise SystemExit("Error: Account verified, but no API key was returned.")
-        env_path = _save_api_key_to_env(str(provisioned_key))
-        configure_mcp_targets(skill=args.skill, api_key=str(provisioned_key), repo=args.repo, write_env=False)
-        print(
-            json.dumps(
-                {
-                    "status": "authenticated",
-                    "email": email,
-                    "api_key": provisioned_key,
-                    "env_saved": str(env_path),
-                    "mcp_server": "/ml-memory",
-                }
-            )
-        )
+        env_path: Path | None = None
+        if args.write_env or args.init:
+            env_path = _save_api_key_to_env(str(provisioned_key))
+        if args.init:
+            configure_mcp_targets(skill=args.skill, api_key=str(provisioned_key), repo=args.repo, write_env=False)
+        res_payload: dict[str, Any] = {
+            "status": "authenticated",
+            "email": email,
+            "api_key": provisioned_key,
+            "mcp_server": "ml-memory",
+        }
+        if env_path is not None:
+            res_payload["env_saved"] = str(env_path)
+        print(json.dumps(res_payload))
         return 0
 
     if args.init or args.command == "init":
