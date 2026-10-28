@@ -13,7 +13,7 @@ authors = [
     {name = "SlashML Team", email = "engineering@slashml.ai"}
 ]
 dependencies = [
-    "slashml>=1.0.0",
+    "slashml-memory>=1.0.0",
 ]
 
 [project.urls]

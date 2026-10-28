@@ -1,11 +1,11 @@
-# `/ ml` (`slashml`) Python SDK
+# `/ ml` (`slashml-memory`) Python SDK
 
 Official thin HTTP Python SDK for **`/ ml` (`https://api.slashml.ai`)** — sub-millisecond stateful agent & code memory. Zero native binary or local model dependencies (`urllib.request` standard library).
 
 ## Installation
 
 ```bash
-pip install slashml
+pip install slashml-memory
 export SLASHML_API_KEY="sml_live_..."
 ```
 

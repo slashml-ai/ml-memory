@@ -8,7 +8,7 @@ This directory contains all **publicly published, open-source (`Apache-2.0`) cli
 
 | Directory | Public Package Name | Registry | License | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| [`python/`](./python) | `slashml` | PyPI | `Apache-2.0` | Python SDK (`SlashMLMemory`, `MemoryClient`, `AsyncMemoryClient`, `Memory`, `AsyncMemory` 100% Mem0 drop-in, LangChain / LangGraph / LlamaIndex / CrewAI adapters, `/ml-memory` MCP server) |
+| [`python/`](./python) | `slashml-memory` | PyPI | `Apache-2.0` | Python SDK (`SlashMLMemory`, `MemoryClient`, `AsyncMemoryClient`, `Memory`, `AsyncMemory` 100% Mem0 drop-in, LangChain / LangGraph / LlamaIndex / CrewAI adapters, `/ml-memory` MCP server) |
 | [`typescript/`](./typescript) | `@slashml/memory` | npm | `Apache-2.0` | Zero-dependency TypeScript/Node.js SDK (`SlashMLMemory`, `MemoryClient`, `AsyncMemoryClient`, `Memory`, `AsyncMemory` 100% Mem0 drop-in) + CLI (`npx @slashml/memory`) |
 | [`vercel-ai-provider/`](./vercel-ai-provider) | `@slashml/vercel-ai-provider` | npm | `Apache-2.0` | Vercel AI SDK Provider (`createSlashML`, `createMem0`, `slashml`, `mem0`, `retrieveMemories`, `addMemories`, `getMemories`, `searchMemories`) — drop-in replacement for `@mem0/vercel-ai-provider` |
 | [`mcp/`](./mcp) | `@slashml/mcp` | npm | `Apache-2.0` | Standalone local MCP stdio server (`slashml-mcp` and `slashml-mcp-code` for Claude Code, Cursor, Windsurf, Cline, Zed) |
@@ -20,7 +20,7 @@ This directory contains all **publicly published, open-source (`Apache-2.0`) cli
 
 ## Quick Start
 
-### 1. Python SDK (`pip install slashml`)
+### 1. Python SDK (`pip install slashml-memory`)
 
 ```python
 from slashml import SlashMLMemory

@@ -9,7 +9,7 @@
 
 | Component | Path | Package Name | License | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Python SDK** | [`python/`](./python) | `slashml` | `Apache-2.0` | Complete & Tested |
+| **Python SDK** | [`python/`](./python) | `slashml-memory` | `Apache-2.0` | Complete & Tested |
 | **TypeScript SDK** | [`typescript/`](./typescript) | `@slashml/memory` | `Apache-2.0` | Complete & Tested |
 | **Vercel AI SDK Provider** | [`vercel-ai-provider/`](./vercel-ai-provider) | `@slashml/vercel-ai-provider` | `Apache-2.0` | Complete & Tested |
 | **MCP Server** | [`mcp/`](./mcp) | `@slashml/mcp` | `Apache-2.0` | Complete & Tested |

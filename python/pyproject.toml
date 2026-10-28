@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "slashml"
+name = "slashml-memory"
 version = "1.0.0"
 description = "/ ml (SlashML): Sub-Millisecond Stateful Agent & Code Memory Python SDK"
 readme = "README.md"
