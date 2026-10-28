@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slashml"
+version = "1.0.0"
+description = "/ ml (SlashML): Sub-Millisecond Stateful Agent & Code Memory Python SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "SlashML Inc."}]
+dependencies = [
+    "numpy>=1.24.0",
+]
+
+[project.urls]
+Homepage = "https://slashml.ai"
+Repository = "https://github.com/slashml-ai/ml-memory"
+
+[project.scripts]
+slashml-mcp = "slashml.mcp_server:main"
+slashml-mcp-code = "slashml.mcp_server:main_code_only"
+slashml-eval = "slashml.eval_cli:main"
+
+[tool.setuptools]
+packages = ["slashml", "slashml.integrations"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+slashml = ["py.typed"]

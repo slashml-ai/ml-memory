@@ -1,0 +1,15 @@
+# Never commit Rust source code, cargo locks, or build directories to the public repo
+crates/
+Cargo.toml
+Cargo.lock
+target/
+*.rs
+
+# Never commit internal engine or research files
+proprietary-engine/
+*.egg-info/
+build/
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slashml-eval"
+version = "1.0.0"
+description = "Public Benchmark Verification CLI for SlashML (LongMemEval, LoCoMo, ConvoMem)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "SlashML Team", email = "engineering@slashml.ai"}
+]
+dependencies = [
+    "slashml>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://slashml.ai"
+Repository = "https://github.com/slashml-ai/ml-memory"
+
+[project.scripts]
+slashml-eval = "slashml_eval:main"
+
+[tool.setuptools]
+py-modules = ["slashml_eval"]

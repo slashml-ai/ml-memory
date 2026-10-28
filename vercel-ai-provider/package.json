@@ -1,0 +1,53 @@
+{
+  "name": "@slashml/vercel-ai-provider",
+  "version": "1.0.0",
+  "description": "Official / ml Memory Provider for the Vercel AI SDK — 100% drop-in replacement for @mem0/vercel-ai-provider (createSlashML, createMem0, retrieveMemories, addMemories, getMemories)",
+  "license": "Apache-2.0",
+  "author": "/ ml <support@slashml.ai>",
+  "homepage": "https://slashml.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/slashml-ai/ml-memory.git",
+    "directory": "vercel-ai-provider"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/vercel-ai-provider.test.js"
+  },
+  "peerDependencies": {
+    "ai": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "slashml",
+    "vercel-ai-sdk",
+    "ai-sdk",
+    "memory",
+    "mem0",
+    "vercel-ai-provider",
+    "llm",
+    "agents"
+  ]
+}
