@@ -132,7 +132,7 @@ class RepositoryIndexer:
             )
         return chunks
 
-    def index_directory(self, root_dir: str | Path, *, max_files: int = 500) -> dict[str, Any]:
+    def index_directory(self, root_dir: str | Path, *, max_files: int = 10000) -> dict[str, Any]:
         root = Path(root_dir).resolve()
         documents: list[dict[str, Any]] = []
         files_indexed = 0

@@ -32,7 +32,7 @@ from slashml.repo_indexer import (
     search_code_by_behavior,
 )
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 __all__ = [
     "AsyncMemory",
     "AsyncMemoryClient",

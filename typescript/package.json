@@ -1,6 +1,6 @@
 {
   "name": "@slashml/memory",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "/ ml (SlashML): Sub-Millisecond Stateful Agent & Code Memory SDK for TypeScript & Node.js",
   "license": "Apache-2.0",
   "homepage": "https://slashml.ai",

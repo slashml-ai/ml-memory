@@ -1,6 +1,6 @@
 {
   "name": "@slashml/mcp",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Official Model Context Protocol (MCP) server for SlashML (Claude Desktop, Cursor, Windsurf, Cline, Zed)",
   "license": "Apache-2.0",
   "homepage": "https://slashml.ai",

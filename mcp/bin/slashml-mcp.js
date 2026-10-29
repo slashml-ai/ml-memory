@@ -13,7 +13,7 @@ const readline = require("readline");
 
 const DEFAULT_BASE_URL = "https://api.slashml.ai";
 const DEFAULT_CONSOLE_URL = "https://app.slashml.ai";
-const PACKAGE_VERSION = "1.0.2";
+const PACKAGE_VERSION = "1.0.3";
 const GENERIC_SKILL_NAMES = new Set(["ml-memory", "/ml-memory", "slashml", "all", "default"]);
 
 function printHelp() {
@@ -409,8 +409,8 @@ const STANDARD_TOOLS = [
         },
         max_files: {
           type: "integer",
-          description: "Maximum number of source files to index (default: 500)",
-          default: 500,
+          description: "Maximum number of source files to index (default: 10000)",
+          default: 10000,
         },
         force: {
           type: "boolean",
@@ -500,7 +500,7 @@ async function apiRequest(opts, method, urlPath, body) {
   return data;
 }
 
-function walkCodeFiles(rootDir, maxFiles = 500, userId = "default") {
+function walkCodeFiles(rootDir, maxFiles = 10000, userId = "default") {
   const exts = new Set([".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"]);
   const skipDirs = new Set([
     ".git",
@@ -645,7 +645,7 @@ async function dispatchTool(opts, name, args = {}) {
   if (name === "index_repository") {
     const rawPath = args.path || args.repo_path || opts.repo || ".";
     const repoPath = path.resolve(rawPath);
-    const maxFiles = Math.max(1, Math.min(Number(args.max_files) || 500, 5000));
+    const maxFiles = Math.max(1, Math.min(Number(args.max_files) || 10000, 50000));
     const documents = walkCodeFiles(repoPath, maxFiles, uid);
     if (documents.length === 0) {
       return {
@@ -660,6 +660,7 @@ async function dispatchTool(opts, name, args = {}) {
     const BATCH_SIZE = 200;
     let totalIngested = 0;
     let totalTokens = 0;
+    let totalElapsedMs = 0;
     let batches = 0;
     let lastRes = {};
     for (let i = 0; i < documents.length; i += BATCH_SIZE) {
@@ -672,6 +673,7 @@ async function dispatchTool(opts, name, args = {}) {
       lastRes = res || {};
       totalIngested += Number(res?.ingested_count ?? res?.count ?? batch.length);
       totalTokens += Number(res?.tokens_processed ?? 0);
+      totalElapsedMs += Number(res?.elapsed_ms ?? 0);
       batches += 1;
     }
     return {
@@ -681,6 +683,7 @@ async function dispatchTool(opts, name, args = {}) {
       indexed_files: documents.length,
       ingested_count: totalIngested,
       tokens_processed: totalTokens,
+      elapsed_ms: Number(totalElapsedMs.toFixed(2)),
       batches,
     };
   }

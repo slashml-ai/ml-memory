@@ -289,7 +289,7 @@ class SlashMLMCPServer:
                     "properties": {
                         "path": {"type": "string", "description": "Repository directory path"},
                         "repo_path": {"type": "string", "description": "Alias for path"},
-                        "max_files": {"type": "integer", "default": 500},
+                        "max_files": {"type": "integer", "default": 10000},
                         "force": {"type": "boolean", "default": False},
                     },
                 },
@@ -425,7 +425,7 @@ class SlashMLMCPServer:
 
         if name == "index_repository":
             target = args.get("path") or args.get("repo_path") or self.repo_path or "."
-            max_files = int(args.get("max_files") or 500)
+            max_files = int(args.get("max_files") or 10000)
             summary = self.indexer.index_directory(target, max_files=max_files)
             return {"content": [{"type": "text", "text": json.dumps(summary)}]}
 
@@ -473,7 +473,7 @@ class SlashMLMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": proto,
-                    "serverInfo": {"name": "ml-memory", "version": "1.0.2"},
+                    "serverInfo": {"name": "ml-memory", "version": "1.0.3"},
                     "capabilities": {"tools": {}},
                 },
             }
@@ -537,7 +537,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(prog="slashml-mcp")
     parser.add_argument("command", nargs="?", default=None, help="Optional command (e.g. 'init')")
-    parser.add_argument("-v", "--version", action="version", version="1.0.1")
+    parser.add_argument("-v", "--version", action="version", version="1.0.3")
     parser.add_argument("--init", action="store_true", help="Configure ml-memory MCP in IDE configs")
     parser.add_argument("--skill", default=None, help="Skill or IDE target filter (e.g. ml-memory, cursor)")
     parser.add_argument("--api-key", default=None, help="SlashML Cloud API key (or SLASHML_API_KEY)")
