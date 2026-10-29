@@ -28,6 +28,7 @@ IGNORED_DIRS = {
     ".svn",
     ".venv",
     "venv",
+    "env",
     "node_modules",
     "target",
     "dist",
@@ -35,6 +36,21 @@ IGNORED_DIRS = {
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
+    "upstream",
+    "experiments",
+    "corpus",
+    "results",
+    "vendor",
+    "third_party",
+    "coverage",
+    ".next",
+    ".nuxt",
+    ".wrangler",
+    "site",
+    "artifacts",
+    "tmp",
+    "temp",
+    "logs",
 }
 
 
@@ -116,15 +132,21 @@ class RepositoryIndexer:
             )
         return chunks
 
-    def index_directory(self, root_dir: str | Path) -> dict[str, Any]:
+    def index_directory(self, root_dir: str | Path, *, max_files: int = 500) -> dict[str, Any]:
         root = Path(root_dir).resolve()
         documents: list[dict[str, Any]] = []
         files_indexed = 0
 
         for path in sorted(root.rglob("*")):
+            if files_indexed >= max_files:
+                break
             if not path.is_file() or path.suffix not in SUPPORTED_CODE_EXTENSIONS:
                 continue
-            if any(part in IGNORED_DIRS for part in path.parts):
+            rel_parts = path.relative_to(root).parts
+            if any(
+                part in IGNORED_DIRS or part.startswith(".") or part.startswith("results-")
+                for part in rel_parts[:-1]
+            ):
                 continue
             rel_path = path.relative_to(root).as_posix()
             try:
@@ -156,9 +178,11 @@ class RepositoryIndexer:
                     }
                 )
 
-        if documents:
+        batch_size = 200
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i : i + batch_size]
             self.client.ingest(
-                documents=documents,
+                documents=batch,
                 user_id=self.user_id,
                 namespace=self.namespace,
             )

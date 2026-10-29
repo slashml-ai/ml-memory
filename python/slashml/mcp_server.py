@@ -25,6 +25,83 @@ from slashml.repo_indexer import (
 
 DEFAULT_CONSOLE_URL = "https://app.slashml.ai"
 GENERIC_SKILL_NAMES = {"ml-memory", "/ml-memory", "slashml", "all", "default"}
+PUBLIC_CONSUMER_EMAIL_DOMAINS = {
+    "gmail.com",
+    "googlemail.com",
+    "hotmail.com",
+    "hotmail.co.uk",
+    "hotmail.fr",
+    "hotmail.de",
+    "hotmail.es",
+    "hotmail.it",
+    "outlook.com",
+    "outlook.co.uk",
+    "outlook.fr",
+    "outlook.de",
+    "live.com",
+    "live.co.uk",
+    "msn.com",
+    "yahoo.com",
+    "yahoo.co.uk",
+    "yahoo.co.jp",
+    "yahoo.fr",
+    "yahoo.de",
+    "yahoo.ca",
+    "yahoo.com.br",
+    "yahoo.in",
+    "ymail.com",
+    "rocketmail.com",
+    "myyahoo.com",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+    "protonmail.ch",
+    "pm.me",
+    "zoho.com",
+    "zohomail.com",
+    "gmx.com",
+    "gmx.de",
+    "gmx.net",
+    "mail.com",
+    "email.com",
+    "fastmail.com",
+    "fastmail.fm",
+    "hey.com",
+    "tutanota.com",
+    "tuta.com",
+    "tuta.io",
+    "yandex.com",
+    "yandex.ru",
+    "mail.ru",
+    "bk.ru",
+    "inbox.ru",
+    "list.ru",
+    "qq.com",
+    "163.com",
+    "126.com",
+    "foxmail.com",
+    "naver.com",
+    "daum.net",
+    "hanmail.net",
+}
+
+
+def _assert_cli_work_email(raw_email: str) -> str:
+    cleaned = (raw_email or "").strip().lower()
+    if "@" not in cleaned or "." not in cleaned.split("@", 1)[1]:
+        raise SystemExit("Error: Please provide a valid work email address (e.g. you@company.com).")
+    _local_part, domain_part = cleaned.split("@", 1)
+    canonical_domain = "gmail.com" if domain_part == "googlemail.com" else domain_part
+    if canonical_domain in PUBLIC_CONSUMER_EMAIL_DOMAINS:
+        raise SystemExit(
+            "Error: Public email domains (@gmail.com, @hotmail.com, @outlook.com, @yahoo.com, @icloud.com, etc.) "
+            "require Google or GitHub Sign-In at https://app.slashml.ai/auth/google. "
+            "For CLI OTP signup (--signup), please use a work or custom domain email (you@company.com)."
+        )
+    return cleaned
 
 
 def _save_api_key_to_env(api_key: str, cwd: Path | None = None) -> Path:
@@ -211,8 +288,10 @@ class SlashMLMCPServer:
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Repository directory path"},
+                        "repo_path": {"type": "string", "description": "Alias for path"},
+                        "max_files": {"type": "integer", "default": 500},
+                        "force": {"type": "boolean", "default": False},
                     },
-                    "required": ["path"],
                 },
             },
             {
@@ -345,8 +424,9 @@ class SlashMLMCPServer:
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
 
         if name == "index_repository":
-            target = args.get("path") or self.repo_path or "."
-            summary = self.indexer.index_directory(target)
+            target = args.get("path") or args.get("repo_path") or self.repo_path or "."
+            max_files = int(args.get("max_files") or 500)
+            summary = self.indexer.index_directory(target, max_files=max_files)
             return {"content": [{"type": "text", "text": json.dumps(summary)}]}
 
         if name == "search_code_by_behavior":
@@ -376,22 +456,36 @@ class SlashMLMCPServer:
         req_id = request.get("id")
         params = request.get("params") or {}
 
-        if method == "notifications/initialized":
+        if (
+            req_id is None
+            or method == "notifications/initialized"
+            or (isinstance(method, str) and method.startswith("notifications/"))
+        ):
             return None
 
         if method == "ping":
             return {"jsonrpc": "2.0", "id": req_id, "result": {}}
 
         if method == "initialize":
+            proto = params.get("protocolVersion") or "2024-11-05"
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": "ml-memory", "version": "1.0.1"},
+                    "protocolVersion": proto,
+                    "serverInfo": {"name": "ml-memory", "version": "1.0.2"},
                     "capabilities": {"tools": {}},
                 },
             }
+
+        if method == "resources/list":
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": []}}
+
+        if method == "resources/templates/list":
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"resourceTemplates": []}}
+
+        if method == "prompts/list":
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"prompts": []}}
 
         if method == "tools/list":
             return {
@@ -455,8 +549,13 @@ def main(
     )
     parser.add_argument("--user-id", default="default", help="Default user/workspace namespace")
     parser.add_argument("--repo", "--workspace", dest="repo", default=None, help="Repository/workspace path to auto-index")
-    parser.add_argument("--signup", default=None, metavar="EMAIL", help="Request a 6-digit verification code via email")
-    parser.add_argument("--verify", nargs="+", default=None, metavar=("EMAIL", "CODE"), help="Verify email and 6-digit code to provision SLASHML_API_KEY")
+    parser.add_argument(
+        "--signup",
+        default=None,
+        metavar="WORK_EMAIL",
+        help="Request a 6-digit verification code via work email (@company.com; for @gmail.com / @hotmail.com sign in with Google/GitHub at https://app.slashml.ai)",
+    )
+    parser.add_argument("--verify", nargs="+", default=None, metavar=("WORK_EMAIL", "CODE"), help="Verify work email and 6-digit code to provision SLASHML_API_KEY")
     parser.add_argument("--code", default=None, help="6-digit verification code (optional alternative to positional arg)")
     parser.add_argument("--write-env", action="store_true", help="Write SLASHML_API_KEY to .env")
     parser.add_argument("--code-only", action="store_true", default=code_only_default)
@@ -464,7 +563,7 @@ def main(
     args = parser.parse_args(argv)
 
     if args.signup:
-        email = args.signup.strip()
+        email = _assert_cli_work_email(args.signup)
         data = _console_post(args.console_url, "/api/auth/magic-link/request", {"email": email, "source": "cli"})
         out: dict[str, Any] = {
             "status": "verification_code_sent",
@@ -480,7 +579,7 @@ def main(
         return 0
 
     if args.verify:
-        email = args.verify[0].strip()
+        email = _assert_cli_work_email(args.verify[0])
         code = args.verify[1].strip() if len(args.verify) > 1 else (args.code or "").strip()
         if not code:
             raise SystemExit("Error: Missing 6-digit verification code. Usage: slashml-mcp --verify <email> <6-digit-code>")

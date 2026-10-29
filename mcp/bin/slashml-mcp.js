@@ -13,7 +13,7 @@ const readline = require("readline");
 
 const DEFAULT_BASE_URL = "https://api.slashml.ai";
 const DEFAULT_CONSOLE_URL = "https://app.slashml.ai";
-const PACKAGE_VERSION = "1.0.1";
+const PACKAGE_VERSION = "1.0.2";
 const GENERIC_SKILL_NAMES = new Set(["ml-memory", "/ml-memory", "slashml", "all", "default"]);
 
 function printHelp() {
@@ -39,8 +39,86 @@ Options:
   --init                         Write ml-memory MCP entry to Cursor, Windsurf, or .mcp.json
   --skill <name>                 Filter IDE config target during --init (default: ml-memory)
   --write-env                    Save SLASHML_API_KEY to .env in the current directory
-  --signup <email>               Request a 6-digit email verification code to provision a free API key
-  --verify <email> <code>        Verify 6-digit code and print the new SLASHML_API_KEY to stdout`);
+  --signup <work-email>          Request a 6-digit OTP to provision a / ml free API key (requires work/custom domain @company.com; for @gmail.com / @hotmail.com sign in with Google/GitHub at https://app.slashml.ai)
+  --verify <work-email> <code>   Verify 6-digit code and print the new SLASHML_API_KEY to stdout`);
+}
+
+const PUBLIC_CONSUMER_EMAIL_DOMAINS = new Set([
+  "gmail.com",
+  "googlemail.com",
+  "hotmail.com",
+  "hotmail.co.uk",
+  "hotmail.fr",
+  "hotmail.de",
+  "hotmail.es",
+  "hotmail.it",
+  "outlook.com",
+  "outlook.co.uk",
+  "outlook.fr",
+  "outlook.de",
+  "live.com",
+  "live.co.uk",
+  "msn.com",
+  "yahoo.com",
+  "yahoo.co.uk",
+  "yahoo.co.jp",
+  "yahoo.fr",
+  "yahoo.de",
+  "yahoo.ca",
+  "yahoo.com.br",
+  "yahoo.in",
+  "ymail.com",
+  "rocketmail.com",
+  "myyahoo.com",
+  "icloud.com",
+  "me.com",
+  "mac.com",
+  "aol.com",
+  "proton.me",
+  "protonmail.com",
+  "protonmail.ch",
+  "pm.me",
+  "zoho.com",
+  "zohomail.com",
+  "gmx.com",
+  "gmx.de",
+  "gmx.net",
+  "mail.com",
+  "email.com",
+  "fastmail.com",
+  "fastmail.fm",
+  "hey.com",
+  "tutanota.com",
+  "tuta.com",
+  "tuta.io",
+  "yandex.com",
+  "yandex.ru",
+  "mail.ru",
+  "bk.ru",
+  "inbox.ru",
+  "list.ru",
+  "qq.com",
+  "163.com",
+  "126.com",
+  "foxmail.com",
+  "naver.com",
+  "daum.net",
+  "hanmail.net",
+]);
+
+function assertCliWorkEmail(rawEmail) {
+  const cleaned = String(rawEmail || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleaned)) {
+    throw new Error("Please provide a valid work email address (e.g. you@company.com).");
+  }
+  const [, domainPart] = cleaned.split("@");
+  const canonicalDomain = domainPart === "googlemail.com" ? "gmail.com" : domainPart;
+  if (PUBLIC_CONSUMER_EMAIL_DOMAINS.has(canonicalDomain)) {
+    throw new Error(
+      "Public email domains (@gmail.com, @hotmail.com, @outlook.com, @yahoo.com, @icloud.com, etc.) require Google or GitHub Sign-In at https://app.slashml.ai/auth/google. For CLI OTP signup (--signup), please use a work or custom domain email (you@company.com)."
+    );
+  }
+  return cleaned;
 }
 
 function parseArgs(argv) {
@@ -180,13 +258,14 @@ function nativeNodeInit(skill, apiKey, repo = null, writeEnv = false) {
 }
 
 async function runCliSignup(email, consoleUrl) {
+  const checkedEmail = assertCliWorkEmail(email);
   const res = await fetch(`${consoleUrl}/api/auth/magic-link/request`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "User-Agent": `slashml-mcp-node/${PACKAGE_VERSION}`,
     },
-    body: JSON.stringify({ email: email.trim(), source: "cli" }),
+    body: JSON.stringify({ email: checkedEmail, source: "cli" }),
   });
   const text = await res.text();
   let data = {};
@@ -201,14 +280,15 @@ async function runCliSignup(email, consoleUrl) {
   console.log(
     JSON.stringify({
       status: "verification_code_sent",
-      email: email.trim(),
-      message: `A 6-digit verification code has been sent to ${email.trim()}. Ask the user for the 6-digit code and run: npx -y @slashml/memory --verify ${email.trim()} <6-digit-code>`,
+      email: checkedEmail,
+      message: `A 6-digit verification code has been sent to ${checkedEmail}. Ask the user for the 6-digit code and run: npx -y @slashml/memory --verify ${checkedEmail} <6-digit-code>`,
       ...(data.dev_otp_code ? { dev_otp_code: data.dev_otp_code } : {}),
     })
   );
 }
 
 async function runCliVerify(email, code, opts) {
+  const checkedEmail = assertCliWorkEmail(email);
   if (!code) {
     throw new Error("Missing 6-digit verification code. Usage: npx -y @slashml/memory --verify <email> <6-digit-code>");
   }
@@ -219,7 +299,7 @@ async function runCliVerify(email, code, opts) {
       "User-Agent": `slashml-mcp-node/${PACKAGE_VERSION}`,
     },
     body: JSON.stringify({
-      email: email.trim(),
+      email: checkedEmail,
       otp_code: String(code).trim(),
       code: String(code).trim(),
       issue_cli_key: true,
@@ -319,9 +399,25 @@ const STANDARD_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Repository directory path" },
+        path: {
+          type: "string",
+          description: "Repository directory path (defaults to current workspace directory)",
+        },
+        repo_path: {
+          type: "string",
+          description: "Alias for path (repository directory path)",
+        },
+        max_files: {
+          type: "integer",
+          description: "Maximum number of source files to index (default: 500)",
+          default: 500,
+        },
+        force: {
+          type: "boolean",
+          description: "Force full re-index of repository files",
+          default: false,
+        },
       },
-      required: ["path"],
     },
   },
   {
@@ -404,31 +500,96 @@ async function apiRequest(opts, method, urlPath, body) {
   return data;
 }
 
-function walkCodeFiles(rootDir) {
+function walkCodeFiles(rootDir, maxFiles = 500, userId = "default") {
   const exts = new Set([".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"]);
-  const skipDirs = new Set([".git", "node_modules", ".venv", "dist", "build", "target", "__pycache__"]);
+  const skipDirs = new Set([
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "env",
+    "dist",
+    "build",
+    "target",
+    "__pycache__",
+    "upstream",
+    "experiments",
+    "corpus",
+    "results",
+    "vendor",
+    "third_party",
+    "coverage",
+    ".next",
+    ".nuxt",
+    ".wrangler",
+    "site",
+    "artifacts",
+    "tmp",
+    "temp",
+    "logs",
+    "Pods",
+    "DerivedData",
+  ]);
+  const lowPriorityDirs = new Set([
+    "tests",
+    "test",
+    "__tests__",
+    "audits",
+    "review",
+    "docs",
+    "examples",
+    "benchmarks",
+    "scripts",
+  ]);
   const docs = [];
 
   function walk(dir) {
+    if (docs.length >= maxFiles) return;
     let entries = [];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
       return;
     }
+    entries.sort((a, b) => {
+      const aLow = a.isDirectory() && lowPriorityDirs.has(a.name) ? 1 : 0;
+      const bLow = b.isDirectory() && lowPriorityDirs.has(b.name) ? 1 : 0;
+      if (aLow !== bLow) return aLow - bLow;
+      return a.name.localeCompare(b.name);
+    });
     for (const entry of entries) {
-      if (entry.name.startsWith(".") || skipDirs.has(entry.name)) continue;
+      if (docs.length >= maxFiles) break;
+      if (
+        entry.name.startsWith(".") ||
+        skipDirs.has(entry.name) ||
+        entry.name.startsWith("results-")
+      ) {
+        continue;
+      }
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(fullPath);
-      } else if (entry.isFile() && exts.has(path.extname(entry.name))) {
+      } else if (
+        entry.isFile() &&
+        exts.has(path.extname(entry.name)) &&
+        !entry.name.endsWith(".min.js") &&
+        !entry.name.endsWith(".bundle.js")
+      ) {
         try {
+          const stat = fs.statSync(fullPath);
+          if (stat.size === 0 || stat.size > 512 * 1024) continue;
           const content = fs.readFileSync(fullPath, "utf8");
           const relPath = path.relative(rootDir, fullPath);
           docs.push({
             id: `file::${relPath}`,
             text: `[FILE] ${relPath}\n${content.slice(0, 4000)}`,
-            metadata: { kind: "code_symbol", file_path: relPath },
+            metadata: {
+              kind: "code_symbol",
+              modality: "code",
+              file_path: relPath,
+              language: path.extname(entry.name).slice(1),
+              ...(userId ? { user_id: userId } : {}),
+            },
           });
         } catch {
           // ignore unreadable files
@@ -447,18 +608,31 @@ async function dispatchTool(opts, name, args = {}) {
   const uid = args.user_id || opts.userId;
 
   if (name === "add_memory") {
+    const rawText = args.text !== undefined ? args.text : args.messages;
+    const messagesPayload = Array.isArray(rawText)
+      ? rawText
+      : [
+          {
+            role: "user",
+            content: String(rawText || ""),
+            ...(args.memory_id ? { id: String(args.memory_id) } : {}),
+            ...(args.metadata ? { metadata: args.metadata } : {}),
+          },
+        ];
     return apiRequest(opts, "POST", "/v1/memories", {
-      messages: args.text,
+      messages: messagesPayload,
       user_id: uid,
       memory_id: args.memory_id,
       metadata: args.metadata || {},
     });
   }
   if (name === "search_memories") {
+    const k = Number(args.limit || args.top_k || 5);
     return apiRequest(opts, "POST", "/v1/memories/search", {
       query: args.query,
       user_id: uid,
-      limit: args.limit || 5,
+      limit: k,
+      top_k: k,
     });
   }
   if (name === "get_memories") {
@@ -469,30 +643,67 @@ async function dispatchTool(opts, name, args = {}) {
     return apiRequest(opts, "DELETE", `/v1/memories/${encodeURIComponent(args.memory_id)}`);
   }
   if (name === "index_repository") {
-    const repoPath = path.resolve(args.path || opts.repo || ".");
-    const documents = walkCodeFiles(repoPath);
-    const res = await apiRequest(opts, "POST", "/v1/memory/ingest", {
-      documents,
-      user_id: uid,
-    });
-    return { indexed_files: documents.length, ...res };
+    const rawPath = args.path || args.repo_path || opts.repo || ".";
+    const repoPath = path.resolve(rawPath);
+    const maxFiles = Math.max(1, Math.min(Number(args.max_files) || 500, 5000));
+    const documents = walkCodeFiles(repoPath, maxFiles, uid);
+    if (documents.length === 0) {
+      return {
+        status: "indexed",
+        repo_path: repoPath,
+        indexed_files: 0,
+        ingested_count: 0,
+        tokens_processed: 0,
+        batches: 0,
+      };
+    }
+    const BATCH_SIZE = 200;
+    let totalIngested = 0;
+    let totalTokens = 0;
+    let batches = 0;
+    let lastRes = {};
+    for (let i = 0; i < documents.length; i += BATCH_SIZE) {
+      const batch = documents.slice(i, i + BATCH_SIZE);
+      const res = await apiRequest(opts, "POST", "/v1/memory/ingest", {
+        documents: batch,
+        update_scale_cartridge: false,
+        user_id: uid,
+      });
+      lastRes = res || {};
+      totalIngested += Number(res?.ingested_count ?? res?.count ?? batch.length);
+      totalTokens += Number(res?.tokens_processed ?? 0);
+      batches += 1;
+    }
+    return {
+      ...lastRes,
+      status: lastRes.status || "indexed",
+      repo_path: repoPath,
+      indexed_files: documents.length,
+      ingested_count: totalIngested,
+      tokens_processed: totalTokens,
+      batches,
+    };
   }
   if (name === "search_code_by_behavior") {
+    const k = Number(args.top_k || args.limit || 5);
     return apiRequest(opts, "POST", "/v1/memories/search", {
       query: args.query,
       user_id: uid,
-      limit: args.top_k || 5,
+      limit: k,
+      top_k: k,
       filters: { kind: "code_symbol", ...(args.language ? { language: args.language } : {}) },
     });
   }
   if (name === "find_bug_candidates") {
+    const k = Number(args.top_k || args.limit || 5);
     const combinedQuery = args.stack_trace
       ? `${args.bug_description}\n${args.stack_trace}`
       : args.bug_description;
     return apiRequest(opts, "POST", "/v1/memories/search", {
       query: combinedQuery,
       user_id: uid,
-      limit: args.top_k || 5,
+      limit: k,
+      top_k: k,
       filters: { kind: "code_symbol" },
     });
   }
@@ -501,18 +712,37 @@ async function dispatchTool(opts, name, args = {}) {
 
 async function handleRpc(opts, req) {
   const { method, id, params } = req;
-  if (method === "notifications/initialized") return null;
+  if (
+    id === undefined ||
+    id === null ||
+    (typeof method === "string" && method.startsWith("notifications/"))
+  ) {
+    return null;
+  }
   if (method === "ping") return { jsonrpc: "2.0", id, result: {} };
   if (method === "initialize") {
+    const clientProto =
+      typeof params?.protocolVersion === "string" && params.protocolVersion
+        ? params.protocolVersion
+        : "2024-11-05";
     return {
       jsonrpc: "2.0",
       id,
       result: {
-        protocolVersion: "2024-11-05",
+        protocolVersion: clientProto,
         serverInfo: { name: "ml-memory", version: PACKAGE_VERSION },
         capabilities: { tools: {} },
       },
     };
+  }
+  if (method === "resources/list") {
+    return { jsonrpc: "2.0", id, result: { resources: [] } };
+  }
+  if (method === "resources/templates/list") {
+    return { jsonrpc: "2.0", id, result: { resourceTemplates: [] } };
+  }
+  if (method === "prompts/list") {
+    return { jsonrpc: "2.0", id, result: { prompts: [] } };
   }
   if (method === "tools/list") {
     const tools = opts.codeMode

@@ -321,7 +321,21 @@ test("SDK recall({ query, userId, topK }) and CLI --signup / --verify onboarding
     });
     assert.match(helpOut, /claude mcp add --scope user ml-memory/);
 
-    // 3. Test CLI --signup
+    // 2b. Test CLI --signup rejects public consumer domains (@gmail.com, @hotmail.com) and directs to Google/GitHub Sign-In
+    const gmailRejectErr = await new Promise((resolve, reject) => {
+      let stderr = "";
+      const proc = spawn(
+        process.execPath,
+        [cliPath, "--signup", "randomuser@gmail.com", "--console-url", mock.baseUrl],
+        { cwd: tmpDir, env: { ...process.env, HOME: tmpDir }, stdio: "pipe" }
+      );
+      proc.stderr.on("data", (c) => (stderr += c.toString("utf8")));
+      proc.on("error", reject);
+      proc.on("exit", (code) => (code !== 0 ? resolve(stderr) : reject(new Error("expected non-zero exit for public domain"))));
+    });
+    assert.match(gmailRejectErr, /Google or GitHub Sign-In/);
+
+    // 3. Test CLI --signup with work/custom domain
     await new Promise((resolve, reject) => {
       const proc = spawn(
         process.execPath,

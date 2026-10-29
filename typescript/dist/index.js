@@ -271,8 +271,16 @@ class MemoryClient {
   }
 
   async add(messages, options = {}) {
+    const memId = options.memory_id ?? options.memoryId;
+    const normalizedMessages =
+      typeof messages === "string"
+        ? [{ role: "user", content: messages, ...(memId ? { id: memId } : {}) }]
+        : Array.isArray(messages)
+          ? messages
+          : [messages];
     const payload = {
-      messages,
+      messages: normalizedMessages,
+      ...(typeof messages === "string" ? { text: messages } : {}),
       user_id: options.user_id ?? options.userId ?? null,
       agent_id: options.agent_id ?? options.agentId ?? null,
       app_id: options.app_id ?? options.appId ?? null,
@@ -281,9 +289,9 @@ class MemoryClient {
       infer: options.infer ?? true,
       model: this.model,
     };
-    const memId = options.memory_id ?? options.memoryId;
     if (memId) {
       payload.memory_id = memId;
+      payload.id = memId;
     }
     return this.request("POST", "/v1/memories", { jsonBody: payload });
   }

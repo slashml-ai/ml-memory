@@ -11,6 +11,7 @@ import http.client
 import json
 import os
 import socket
+import ssl
 import threading
 import urllib.error
 import urllib.parse
@@ -18,6 +19,26 @@ import urllib.request
 from typing import Any, Callable
 
 DEFAULT_BASE_URL = "https://api.slashml.ai"
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Build an SSLContext that works out-of-the-box on macOS Python.framework builds."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi  # type: ignore[import-not-found]
+
+        ctx.load_verify_locations(cafile=certifi.where())
+        return ctx
+    except Exception:
+        pass
+    for cafile in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+        if os.path.isfile(cafile):
+            try:
+                ctx.load_verify_locations(cafile=cafile)
+                break
+            except Exception:
+                pass
+    return ctx
 
 
 class _FastHTTPConnection(http.client.HTTPConnection):
@@ -129,7 +150,12 @@ class MemoryClient:
         if scheme == "http":
             conn = _FastHTTPConnection(host, port=port or 80, timeout=self.timeout_s)
         else:
-            conn = _FastHTTPSConnection(host, port=port or 443, timeout=self.timeout_s)
+            conn = _FastHTTPSConnection(
+                host,
+                port=port or 443,
+                timeout=self.timeout_s,
+                context=_build_ssl_context(),
+            )
         self._tls_local.conn = conn
         return conn
 
