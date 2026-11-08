@@ -10,7 +10,7 @@ const readline = require("readline");
 
 const DEFAULT_BASE_URL = "https://api.slashml.ai";
 const DEFAULT_CONSOLE_URL = "https://app.slashml.ai";
-const PACKAGE_VERSION = "1.0.8";
+const PACKAGE_VERSION = "1.0.10";
 
 function printHelp() {
   console.log(`@slashml/memory v${PACKAGE_VERSION} -- Official CLI & MCP Stdio Server for / ml (SlashML · https://slashml.ai)
@@ -37,8 +37,13 @@ Options:
   --write-env                    Save SLASHML_API_KEY to .env in the current directory
   --hook                         Run as an ambient IDE/agent lifecycle hook (reads hook JSON from stdin)
   --install-hooks                Register ambient / ml hooks in ~/.claude/settings.json & .cursor/hooks.json
+  sync-rules, --sync-rules       Sync active / ml project rules into CLAUDE.md and AGENTS.md (for cloud sandboxes)
+  watch-sandbox, --watch-sandbox Tail live sandbox transcripts to assimilate rules and inject mid-turn course corrections
+  --daemon                       Run watch-sandbox as a detached background process (exits 0 immediately)
+  --once                         Run a single watch-sandbox transcript scan pass and exit
+  --transcript-dir <dir>         Additional directory to scan for .jsonl agent transcripts
   status, --status               Show ambient memory ROI telemetry (tokens processed, % noise filtered, rules assimilated, amnesia intercepted)
-  --json                         Format status output as JSON
+  --json                         Format status/sync output as JSON
   --signup <work-email>          Request a 6-digit OTP to provision a / ml free API key (requires work/custom domain @company.com; for @gmail.com / @hotmail.com sign in with Google/GitHub at https://app.slashml.ai)
   --verify <work-email> <code>   Verify 6-digit code and print the new SLASHML_API_KEY to stdout`);
 }
@@ -183,6 +188,13 @@ function parseCliArgs(argv) {
   let isInstallHooks = false;
   let isStatus = false;
   let jsonOutput = false;
+  let isSyncRules = false;
+  let isWatchSandbox = false;
+  let isDaemon = false;
+  let isOnce = false;
+  let intervalMs = 1500;
+  let transcriptDir = process.env.SLASHML_TRANSCRIPT_DIR || null;
+  let forgetId = null;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -198,6 +210,20 @@ function parseCliArgs(argv) {
       hookEvent = argv[++i];
     } else if (arg === "--install-hooks" || arg === "install-hooks") {
       isInstallHooks = true;
+    } else if (arg === "--sync-rules" || arg === "sync-rules") {
+      isSyncRules = true;
+    } else if (arg === "--watch-sandbox" || arg === "watch-sandbox") {
+      isWatchSandbox = true;
+    } else if ((arg === "--forget" || arg === "forget") && i + 1 < argv.length) {
+      forgetId = argv[++i];
+    } else if (arg === "--daemon") {
+      isDaemon = true;
+    } else if (arg === "--once") {
+      isOnce = true;
+    } else if (arg === "--interval-ms" && i + 1 < argv.length) {
+      intervalMs = Math.max(250, Number(argv[++i]) || 1500);
+    } else if (arg === "--transcript-dir" && i + 1 < argv.length) {
+      transcriptDir = argv[++i];
     } else if (arg === "--status" || arg === "status") {
       isStatus = true;
     } else if (arg === "--json") {
@@ -258,6 +284,13 @@ function parseCliArgs(argv) {
     isInstallHooks,
     isStatus,
     jsonOutput,
+    isSyncRules,
+    isWatchSandbox,
+    isDaemon,
+    isOnce,
+    intervalMs,
+    transcriptDir,
+    forgetId,
   };
 }
 
@@ -1124,12 +1157,51 @@ async function runAmbientHookMode(opts) {
   if (!dedupState.whispered_blocks_by_session || typeof dedupState.whispered_blocks_by_session !== "object") {
     dedupState.whispered_blocks_by_session = {};
   }
+  if (!dedupState.blocked_by_session || typeof dedupState.blocked_by_session !== "object") {
+    dedupState.blocked_by_session = {};
+  }
+  if (!dedupState.overridden_by_session || typeof dedupState.overridden_by_session !== "object") {
+    dedupState.overridden_by_session = {};
+  }
+  if (!dedupState.blocked_actions_by_session || typeof dedupState.blocked_actions_by_session !== "object") {
+    dedupState.blocked_actions_by_session = {};
+  }
   const whisperKey = sessionKey || scopeStateKey;
   const isMidTurnContinuation =
     rawEventName === "PreInvocation" && Number(payload.invocationNum || 1) > 1;
+  const targetSig = toolIn
+    ? String(
+        toolIn.file_path ||
+          toolIn.path ||
+          toolIn.Path ||
+          toolIn.command ||
+          toolIn.CommandLine ||
+          deltaText.slice(0, 120)
+      )
+        .trim()
+        .toLowerCase()
+    : deltaText.slice(0, 120).toLowerCase();
+
   if (hookEvent === "UserPromptSubmit" && !isMidTurnContinuation && whisperKey) {
-    dedupState.whispered_by_session[whisperKey] = [];
     dedupState.whispered_blocks_by_session[whisperKey] = [];
+  }
+  if (hookEvent === "PreToolUse" && whisperKey) {
+    const prevAct = Array.isArray(dedupState.blocked_actions_by_session[whisperKey])
+      ? dedupState.blocked_actions_by_session[whisperKey]
+      : [];
+    const prevOv = Array.isArray(dedupState.overridden_by_session[whisperKey])
+      ? dedupState.overridden_by_session[whisperKey]
+      : [];
+    const suffix = `:${toolName || ""}:${targetSig}`;
+    const matchedIds = prevAct
+      .filter((entry) => typeof entry === "string" && entry.endsWith(suffix))
+      .map((entry) => entry.slice(0, entry.length - suffix.length))
+      .filter(Boolean);
+    if (matchedIds.length > 0) {
+      dedupState.overridden_by_session[whisperKey] = Array.from(
+        new Set([...prevOv, ...matchedIds])
+      ).slice(-32);
+    }
   }
   const transcriptWhispered = extractWhisperedContextFromCurrentTurn(
     payload.transcriptPath || payload.transcript_path
@@ -1142,6 +1214,18 @@ async function runAmbientHookMode(opts) {
     whisperKey && Array.isArray(dedupState.whispered_blocks_by_session[whisperKey])
       ? dedupState.whispered_blocks_by_session[whisperKey]
       : [];
+  const sessionOverridden = [
+    ...(whisperKey && Array.isArray(dedupState.overridden_by_session[whisperKey])
+      ? dedupState.overridden_by_session[whisperKey]
+      : []),
+    ...(Array.isArray(dedupState.overridden_by_session._global)
+      ? dedupState.overridden_by_session._global
+      : []),
+    ...(Array.isArray(payload.overridden_memory_ids) ? payload.overridden_memory_ids : []),
+    ...(toolIn && Array.isArray(toolIn.override_memory_ids) ? toolIn.override_memory_ids : []),
+    ...(toolIn && Array.isArray(toolIn.overridden_memory_ids) ? toolIn.overridden_memory_ids : []),
+  ];
+  const overriddenMemoryIds = Array.from(new Set(sessionOverridden.map(String).filter(Boolean)));
   const whisperedMemoryIds = Array.from(new Set([...transcriptWhispered.ids, ...sessionWhispered]));
   const whisperedBlocks = Array.from(new Set([...transcriptWhispered.blocks, ...sessionWhisperedBlocks]));
   const streamTextForIntervene =
@@ -1183,6 +1267,7 @@ async function runAmbientHookMode(opts) {
       tool_input: effectiveToolIn,
       tool_response: payload.tool_response || payload.toolResponse || null,
       whispered_memory_ids: whisperedMemoryIds,
+      ...(overriddenMemoryIds.length > 0 ? { overridden_memory_ids: overriddenMemoryIds } : {}),
       commit_writes: isMidTurnContinuation ? false : true,
       model: process.env.SLASHML_MODEL || undefined,
       user_id: opts.userId,
@@ -1222,6 +1307,23 @@ async function runAmbientHookMode(opts) {
             : [];
           const merged = Array.from(new Set([...prev, ...triggeredIds]));
           dedupState.whispered_by_session[whisperKey] = merged.slice(-16);
+          if (resp.intervention_severity === "BLOCK") {
+            const prevBlk = Array.isArray(dedupState.blocked_by_session[whisperKey])
+              ? dedupState.blocked_by_session[whisperKey]
+              : [];
+            dedupState.blocked_by_session[whisperKey] = Array.from(
+              new Set([...prevBlk, ...triggeredIds])
+            ).slice(-16);
+            if (hookEvent === "PreToolUse") {
+              const prevAct = Array.isArray(dedupState.blocked_actions_by_session[whisperKey])
+                ? dedupState.blocked_actions_by_session[whisperKey]
+                : [];
+              const actKeys = triggeredIds.map((id) => `${id}:${toolName || ""}:${targetSig}`);
+              dedupState.blocked_actions_by_session[whisperKey] = Array.from(
+                new Set([...prevAct, ...actKeys])
+              ).slice(-32);
+            }
+          }
         }
         if (whisperKey && resp.intervention_message) {
           const msgTags = String(resp.intervention_message).match(/<memory>[\s\S]*?<\/memory>/gi);
@@ -1301,9 +1403,682 @@ async function runAmbientHookMode(opts) {
   }
 }
 
+const SANDBOX_INTERVENTION_PATH =
+  process.env.SLASHML_SANDBOX_INTERVENTION_PATH || "/tmp/slashml-sandbox-intervention.json";
+const SANDBOX_OFFSETS_PATH =
+  process.env.SLASHML_SANDBOX_OFFSETS_PATH || "/tmp/slashml-sandbox-offsets.json";
+const SANDBOX_PID_PATH =
+  process.env.SLASHML_SANDBOX_PID_PATH || "/tmp/slashml-watch-sandbox.pid";
+
+function resolveSandboxTargets(explicitRepo) {
+  if (explicitRepo && String(explicitRepo).trim()) {
+    return [path.resolve(String(explicitRepo).trim())];
+  }
+  const cwd = process.cwd();
+  const targets = new Set();
+  const repoIndicators = [".git", ".ellipsis", "CLAUDE.md", "AGENTS.md", "package.json", "pyproject.toml"];
+  if (repoIndicators.some((f) => fs.existsSync(path.join(cwd, f)))) {
+    targets.add(cwd);
+  }
+  try {
+    const entries = fs.readdirSync(cwd, { withFileTypes: true });
+    let subCount = 0;
+    for (const entry of entries) {
+      if (subCount >= 6) break;
+      if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      const subPath = path.join(cwd, entry.name);
+      if (repoIndicators.some((f) => fs.existsSync(path.join(subPath, f)))) {
+        targets.add(subPath);
+        subCount += 1;
+      }
+    }
+  } catch {
+    // ignore directory scan errors
+  }
+  if (targets.size === 0) {
+    targets.add(cwd);
+  }
+  return Array.from(targets);
+}
+
+function upsertAmbientMarkdownSection(filePath, sectionBody) {
+  const startMarker = "<!-- SLASHML-AMBIENT-MEMORY:START -->";
+  const endMarker = "<!-- SLASHML-AMBIENT-MEMORY:END -->";
+  const block = `${startMarker}\n${sectionBody.trim()}\n${endMarker}`;
+  let existing = "";
+  if (fs.existsSync(filePath)) {
+    try {
+      existing = fs.readFileSync(filePath, "utf8");
+    } catch {
+      existing = "";
+    }
+  }
+  const startIdx = existing.indexOf(startMarker);
+  const endIdx = existing.indexOf(endMarker);
+  let updated = "";
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    updated =
+      existing.slice(0, startIdx).replace(/\n*$/, "\n\n") +
+      block +
+      "\n" +
+      existing.slice(endIdx + endMarker.length).replace(/^\n*/, "");
+  } else if (existing.trim()) {
+    updated = `${existing.replace(/\n*$/, "")}\n\n${block}\n`;
+  } else {
+    updated = `${block}\n`;
+  }
+  fs.writeFileSync(filePath, updated.replace(/^\n+/, ""), "utf8");
+}
+
+async function runSyncRulesCommand(opts) {
+  const targets = resolveSandboxTargets(opts.repo);
+  const primaryDir = targets[0] || process.cwd();
+  const projectId =
+    process.env.SLASHML_PROJECT_ID || path.basename(primaryDir.replace(/[\\/]+$/, "")) || "default";
+
+  if (!opts.apiKey) {
+    if (!opts.silent) {
+      const msg = {
+        status: "skipped",
+        reason: "SLASHML_API_KEY not set",
+        targets,
+      };
+      if (opts.jsonOutput) {
+        process.stdout.write(JSON.stringify(msg, null, 2) + "\n");
+      } else {
+        console.log("[/ ml] SLASHML_API_KEY not set; skipping sync-rules.");
+      }
+    }
+    return { synced_count: 0, targets };
+  }
+
+  const memories = [];
+  const seenText = new Set();
+
+  try {
+    const targetUserId = opts.userId || "default";
+    const q = new URLSearchParams({
+      user_id: targetUserId,
+      limit: "200",
+      include_code: "false",
+    });
+    const listResp = await apiRequest(opts, "GET", `/v1/memories?${q.toString()}`);
+    const rawItems = Array.isArray(listResp)
+      ? listResp
+      : Array.isArray(listResp?.results)
+        ? listResp.results
+        : Array.isArray(listResp?.memories)
+          ? listResp.memories
+          : [];
+    const reversedItems = rawItems.slice().reverse();
+    const orderedItems = [
+      ...reversedItems.filter((item) => item && item.user_id === targetUserId),
+      ...reversedItems.filter((item) => item && item.user_id !== targetUserId),
+    ];
+    for (const item of orderedItems) {
+      if (!item || typeof item !== "object") continue;
+      const meta = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+      if (meta.kind === "code_symbol" || meta.modality === "code") continue;
+      const text = String(item.memory || item.text || item.content || "").trim();
+      if (!text || text.startsWith("[FILE] ")) continue;
+      const norm = text.toLowerCase();
+      if (seenText.has(norm)) continue;
+      seenText.add(norm);
+      memories.push({
+        id: String(item.id || item.memory_id || `mem_${memories.length + 1}`),
+        user_id: item.user_id || null,
+        text,
+      });
+    }
+  } catch {
+    // Fail-open if listing memories fails
+  }
+
+  let activeIntervention = opts.activeIntervention || "";
+  if (!activeIntervention && fs.existsSync(SANDBOX_INTERVENTION_PATH)) {
+    try {
+      const saved = JSON.parse(fs.readFileSync(SANDBOX_INTERVENTION_PATH, "utf8"));
+      if (saved && saved.intervention_message && Date.now() - Number(saved.timestamp || 0) < 600000) {
+        activeIntervention = String(saved.intervention_message);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const lines = [
+    "## / ml Ambient Project Memory (Auto-Synced)",
+    "",
+    "The following architectural rules, project invariants, and PR review corrections are persisted across ephemeral sandbox sessions by `/ ml` (`https://slashml.ai`). Follow them strictly:",
+    "",
+  ];
+  if (activeIntervention) {
+    lines.push("> [!CAUTION]");
+    lines.push("> **ACTIVE / ml MID-TURN COURSE CORRECTION:**");
+    for (const l of activeIntervention.split(/\r?\n/)) {
+      lines.push(`> ${l}`);
+    }
+    lines.push("");
+  }
+  if (memories.length === 0) {
+    lines.push("- *(No project rules recorded yet for this workspace namespace. New rules and PR review corrections will be assimilated automatically during this session.)*");
+  } else {
+    for (const m of memories.slice(0, 20)) {
+      lines.push(`- **[${m.id}]** ${m.text}`);
+    }
+  }
+
+  const sectionBody = lines.join("\n");
+  const updatedFiles = [];
+  for (const dir of targets) {
+    for (const fname of ["CLAUDE.md", "AGENTS.md"]) {
+      const fpath = path.join(dir, fname);
+      try {
+        upsertAmbientMarkdownSection(fpath, sectionBody);
+        updatedFiles.push(fpath);
+      } catch {
+        // ignore unwritable paths
+      }
+    }
+  }
+
+  const result = {
+    status: "synced",
+    project_id: projectId,
+    user_id: opts.userId || "default",
+    synced_count: memories.length,
+    memories,
+    active_intervention: Boolean(activeIntervention),
+    updated_files: updatedFiles,
+  };
+  if (!opts.silent) {
+    if (opts.jsonOutput) {
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    } else {
+      console.log(
+        `[/ ml] Synced ${memories.length} project memories into ${updatedFiles.length} workspace file(s) (${targets.join(", ")}).`
+      );
+    }
+  }
+  return result;
+}
+
+function collectSandboxTranscriptFiles(extraDir) {
+  const roots = [];
+  const onlyExplicitDir = Boolean(extraDir && String(extraDir).trim());
+  if (onlyExplicitDir) {
+    roots.push(path.resolve(String(extraDir).trim()));
+  } else {
+    const home = os.homedir();
+    roots.push(
+      path.join(home, ".claude", "projects"),
+      path.join(home, ".codex", "sessions"),
+      "/tmp/slashml-transcripts"
+    );
+  }
+  const nowMs = Date.now();
+  const maxAgeMs = 30 * 60 * 1000;
+  const found = [];
+  function walk(dir, depth = 0) {
+    if (depth > 5 || !fs.existsSync(dir)) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (e.isFile() && e.name.endsWith(".jsonl")) {
+        if (!onlyExplicitDir) {
+          try {
+            const st = fs.statSync(full);
+            if (nowMs - st.mtimeMs > maxAgeMs) continue;
+          } catch {
+            continue;
+          }
+        }
+        found.push(full);
+      }
+    }
+  }
+  for (const r of roots) {
+    walk(r, 0);
+  }
+  return found;
+}
+
+function extractEventsFromTranscriptEntry(entry) {
+  const events = [];
+  if (!entry || typeof entry !== "object") return events;
+
+  if (entry.hook_event_name || entry.hookEventName) {
+    events.push({
+      hook_event_name: String(entry.hook_event_name || entry.hookEventName),
+      text: String(entry.text || entry.prompt || ""),
+      prompt: String(entry.prompt || entry.text || ""),
+      tool_name: entry.tool_name || entry.toolName || null,
+      tool_input: entry.tool_input || entry.toolInput || null,
+    });
+    return events;
+  }
+
+  const msg = entry.message && typeof entry.message === "object" ? entry.message : entry;
+  const role = String(msg.role || entry.type || "").toLowerCase();
+
+  if (role === "user" || entry.type === "USER_INPUT") {
+    let text = "";
+    if (typeof msg.content === "string") {
+      text = msg.content;
+    } else if (typeof entry.content === "string") {
+      text = entry.content;
+    } else if (Array.isArray(msg.content)) {
+      text = msg.content
+        .filter((b) => b && (b.type === "text" || typeof b.text === "string"))
+        .map((b) => String(b.text || ""))
+        .join("\n");
+    }
+    if (text && text.trim()) {
+      events.push({
+        hook_event_name: "UserPromptSubmit",
+        text: text.trim(),
+        prompt: text.trim(),
+        tool_name: null,
+        tool_input: null,
+      });
+    }
+    return events;
+  }
+
+  if (role === "assistant" || entry.type === "PLANNER_RESPONSE") {
+    const textParts = [];
+    if (typeof msg.content === "string" && msg.content.trim()) {
+      textParts.push(msg.content.trim());
+    } else if (typeof entry.content === "string" && entry.content.trim()) {
+      textParts.push(entry.content.trim());
+    } else if (Array.isArray(msg.content)) {
+      for (const b of msg.content) {
+        if (!b || typeof b !== "object") continue;
+        if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
+          textParts.push(b.text.trim());
+        } else if (b.type === "tool_use" && b.name) {
+          const toolIn = b.input && typeof b.input === "object" ? b.input : {};
+          const toolSummary =
+            toolIn.command ||
+            toolIn.CommandLine ||
+            toolIn.content ||
+            toolIn.Content ||
+            toolIn.new_string ||
+            toolIn.Replacement ||
+            JSON.stringify(toolIn);
+          events.push({
+            hook_event_name: "PreToolUse",
+            text: String(toolSummary || ""),
+            tool_name: String(b.name),
+            tool_input: toolIn,
+          });
+        }
+      }
+    }
+    if (Array.isArray(entry.tool_calls)) {
+      for (const tc of entry.tool_calls) {
+        if (!tc || typeof tc !== "object") continue;
+        const name = tc.name || (tc.function && tc.function.name);
+        const toolIn = tc.args || tc.arguments || tc.input || (tc.function && tc.function.arguments) || {};
+        if (name) {
+          const parsedIn =
+            typeof toolIn === "string"
+              ? (() => {
+                  try {
+                    return JSON.parse(toolIn);
+                  } catch {
+                    return { raw: toolIn };
+                  }
+                })()
+              : toolIn;
+          const toolSummary =
+            parsedIn.command ||
+            parsedIn.CommandLine ||
+            parsedIn.content ||
+            parsedIn.Content ||
+            parsedIn.new_string ||
+            parsedIn.Replacement ||
+            JSON.stringify(parsedIn);
+          events.push({
+            hook_event_name: "PreToolUse",
+            text: String(toolSummary || ""),
+            tool_name: String(name),
+            tool_input: parsedIn,
+          });
+        }
+      }
+    }
+    if (textParts.length > 0) {
+      events.push({
+        hook_event_name: "Stop",
+        text: textParts.join("\n"),
+        tool_name: null,
+        tool_input: null,
+      });
+    }
+  }
+  return events;
+}
+
+async function scanSandboxTranscriptsOnce(opts, state) {
+  state.whisperedBySession = state.whisperedBySession || {};
+  const files = collectSandboxTranscriptFiles(opts.transcriptDir);
+  const targets = resolveSandboxTargets(opts.repo);
+  const primaryDir = targets[0] || process.cwd();
+  const projectId =
+    process.env.SLASHML_PROJECT_ID || path.basename(primaryDir.replace(/[\\/]+$/, "")) || "default";
+
+  let processedEvents = 0;
+  let assimilatedCount = 0;
+  let intervenedCount = 0;
+  const interventions = [];
+
+  for (const filePath of files) {
+    let stat = null;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      continue;
+    }
+    const prevOffset = Number(state.offsets[filePath] || 0);
+    const startOffset = stat.size < prevOffset ? 0 : prevOffset;
+    if (stat.size <= startOffset) continue;
+
+    const len = stat.size - startOffset;
+    const fd = fs.openSync(filePath, "r");
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, startOffset);
+    fs.closeSync(fd);
+
+    const chunkStr = buf.toString("utf8");
+    const lastNewline = chunkStr.lastIndexOf("\n");
+    if (lastNewline === -1) continue;
+
+    const completeStr = chunkStr.slice(0, lastNewline + 1);
+    state.offsets[filePath] = startOffset + Buffer.byteLength(completeStr, "utf8");
+
+    const sessionId = path.basename(filePath, ".jsonl");
+    const lines = completeStr.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || !line.startsWith("{")) continue;
+      let entry = null;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const evList = extractEventsFromTranscriptEntry(entry);
+      for (const ev of evList) {
+        if (ev.hook_event_name === "UserPromptSubmit" && ev.prompt) {
+          state.lastPromptBySession[sessionId] = ev.prompt;
+        }
+        if (
+          ev.hook_event_name === "PreToolUse" &&
+          ev.tool_name &&
+          HOOK_READ_ONLY_TOOLS.has(String(ev.tool_name).toLowerCase())
+        ) {
+          recordLocalHookDrop(estimateTokens(ev.text));
+          continue;
+        }
+        const deltaText = String(ev.text || "").trim().slice(0, 1024);
+        if (!deltaText || deltaText.length < 4) continue;
+        if (!opts.apiKey) continue;
+
+        const promptContext = state.lastPromptBySession[sessionId] || deltaText;
+        const rawTok = estimateTokens(deltaText);
+        const telem = loadHookTelemetry();
+
+        try {
+          const sessionWhispered = Array.isArray(state.whisperedBySession[sessionId])
+            ? state.whisperedBySession[sessionId]
+            : [];
+          const resp = await apiRequest(opts, "POST", "/v1/memory/intervene", {
+            hook_event_name: ev.hook_event_name,
+            prompt: promptContext,
+            text: deltaText,
+            ...(ev.hook_event_name === "Stop" ? { last_assistant_message: deltaText } : {}),
+            ...(ev.hook_event_name !== "UserPromptSubmit" && sessionWhispered.length > 0
+              ? { whispered_memory_ids: sessionWhispered }
+              : {}),
+            tool_name: ev.tool_name || null,
+            tool_input: ev.tool_input || null,
+            commit_writes: true,
+            user_id: opts.userId || "default",
+            project_id: projectId,
+            session_id: sessionId,
+          });
+          processedEvents += 1;
+          telem.conversation_tokens_processed = (telem.conversation_tokens_processed || 0) + rawTok;
+          telem.events_processed = (telem.events_processed || 0) + 1;
+
+          if (ev.hook_event_name === "UserPromptSubmit" && resp && resp.should_intervene) {
+            const recalledIds =
+              Array.isArray(resp.violated_memory_ids) && resp.violated_memory_ids.length > 0
+                ? resp.violated_memory_ids
+                : resp.triggered_memory_id
+                  ? [resp.triggered_memory_id]
+                  : [];
+            if (recalledIds.length > 0) {
+              state.whisperedBySession[sessionId] = recalledIds;
+            }
+          }
+
+          const isMidTurnBlock =
+            ev.hook_event_name !== "UserPromptSubmit" &&
+            Boolean(resp && resp.should_intervene && resp.intervention_message);
+
+          if (resp && (resp.should_write || isMidTurnBlock)) {
+            const spanTok = estimateTokens(resp.extracted_write_span || deltaText);
+            telem.noise_tokens_filtered =
+              (telem.noise_tokens_filtered || 0) + Math.max(0, rawTok - spanTok);
+            if (resp.should_write) {
+              assimilatedCount += 1;
+              telem.memories_assimilated = (telem.memories_assimilated || 0) + 1;
+              if (resp.write_novelty_action === "SUPERSEDES") {
+                telem.memories_superseded = (telem.memories_superseded || 0) + 1;
+              }
+              await runSyncRulesCommand({ ...opts, silent: true });
+            }
+            if (isMidTurnBlock) {
+              intervenedCount += 1;
+              telem.amnesia_episodes_intercepted = (telem.amnesia_episodes_intercepted || 0) + 1;
+              const interventionRecord = {
+                timestamp: Date.now(),
+                session_id: sessionId,
+                severity: resp.intervention_severity || "BLOCK",
+                intervention_message: resp.intervention_message,
+                violated_memory_ids: resp.violated_memory_ids || [],
+              };
+              interventions.push(interventionRecord);
+              await runSyncRulesCommand({
+                ...opts,
+                silent: true,
+                activeIntervention: resp.intervention_message,
+              });
+              try {
+                fs.writeFileSync(
+                  SANDBOX_INTERVENTION_PATH,
+                  JSON.stringify(interventionRecord, null, 2) + "\n",
+                  "utf8"
+                );
+              } catch {
+                // ignore
+              }
+
+              const ellipsisSessionId = process.env.ELLIPSIS_SESSION_ID;
+              const ellipsisToken =
+                process.env.ELLIPSIS_API_TOKEN || process.env.ELLIPSIS_SESSION_TOKEN;
+              const ellipsisBase = (
+                process.env.ELLIPSIS_API_URL || "https://api.ellipsis.dev"
+              ).replace(/\/+$/, "");
+              if (ellipsisSessionId && ellipsisToken && !state.notifiedSessions[sessionId]) {
+                state.notifiedSessions[sessionId] = true;
+                try {
+                  await fetch(`${ellipsisBase}/v1/sessions/${ellipsisSessionId}/messages`, {
+                    method: "POST",
+                    headers: {
+                      Authorization: `Bearer ${ellipsisToken}`,
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                      message: resp.intervention_message,
+                    }),
+                  });
+                } catch {
+                  // fail-open if session follow-up API is not reachable
+                }
+              }
+            }
+          } else {
+            telem.noise_tokens_filtered = (telem.noise_tokens_filtered || 0) + rawTok;
+            telem.events_filtered_noise = (telem.events_filtered_noise || 0) + 1;
+          }
+          saveHookTelemetry(telem);
+        } catch {
+          // fail-open on transient API error
+        }
+      }
+    }
+  }
+
+  try {
+    fs.writeFileSync(SANDBOX_OFFSETS_PATH, JSON.stringify(state, null, 2) + "\n", "utf8");
+  } catch {
+    // ignore offset persistence error
+  }
+
+  return {
+    scanned_files: files.length,
+    processed_events: processedEvents,
+    memories_assimilated: assimilatedCount,
+    interventions_triggered: intervenedCount,
+    interventions,
+  };
+}
+
+async function runWatchSandboxCommand(opts) {
+  if (opts.isDaemon) {
+    const { spawn } = require("child_process");
+    const forwarded = process.argv
+      .slice(2)
+      .filter((a) => a !== "--daemon");
+    const child = spawn(process.execPath, [__filename, ...forwarded], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    });
+    child.unref();
+    try {
+      fs.writeFileSync(SANDBOX_PID_PATH, String(child.pid) + "\n", "utf8");
+    } catch {
+      // ignore
+    }
+    if (opts.jsonOutput) {
+      process.stdout.write(
+        JSON.stringify({ status: "daemon_started", pid: child.pid }, null, 2) + "\n"
+      );
+    } else {
+      console.log(`[/ ml] Started watch-sandbox background daemon (PID ${child.pid}).`);
+    }
+    return;
+  }
+
+  let state = {
+    offsets: {},
+    lastPromptBySession: {},
+    whisperedBySession: {},
+    notifiedSessions: {},
+  };
+  if (fs.existsSync(SANDBOX_OFFSETS_PATH)) {
+    try {
+      const loaded = JSON.parse(fs.readFileSync(SANDBOX_OFFSETS_PATH, "utf8"));
+      if (loaded && typeof loaded === "object") {
+        state = {
+          offsets: loaded.offsets || {},
+          lastPromptBySession: loaded.lastPromptBySession || {},
+          whisperedBySession: loaded.whisperedBySession || {},
+          notifiedSessions: loaded.notifiedSessions || {},
+        };
+      }
+    } catch {
+      // ignore corrupt offsets file
+    }
+  }
+
+  if (opts.isOnce) {
+    const res = await scanSandboxTranscriptsOnce(opts, state);
+    if (opts.jsonOutput) {
+      process.stdout.write(JSON.stringify(res, null, 2) + "\n");
+    } else {
+      console.log(
+        `[/ ml] Sandbox scan complete: ${res.processed_events} event(s) evaluated, ${res.memories_assimilated} rule(s) assimilated, ${res.interventions_triggered} intervention(s) triggered.`
+      );
+    }
+    return;
+  }
+
+  while (true) {
+    await scanSandboxTranscriptsOnce(opts, state);
+    await new Promise((r) => setTimeout(r, opts.intervalMs || 1500));
+  }
+}
+
+function drainPendingSandboxIntervention() {
+  try {
+    if (!fs.existsSync(SANDBOX_INTERVENTION_PATH)) return null;
+    const saved = JSON.parse(fs.readFileSync(SANDBOX_INTERVENTION_PATH, "utf8"));
+    fs.unlinkSync(SANDBOX_INTERVENTION_PATH);
+    if (saved && saved.intervention_message && Date.now() - Number(saved.timestamp || 0) < 600000) {
+      return String(saved.intervention_message);
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 if (parsed.isInstallHooks) {
   installAmbientHooks(parsed.apiKey);
   process.exit(0);
+}
+
+if (parsed.forgetId) {
+  apiRequest(parsed, "DELETE", `/v1/memories/${encodeURIComponent(parsed.forgetId)}`)
+    .then((res) => {
+      if (parsed.jsonOutput) {
+        process.stdout.write(JSON.stringify(res || { status: "deleted" }, null, 2) + "\n");
+      } else {
+        console.log(`[/ ml] Deleted memory ${parsed.forgetId}.`);
+      }
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error(`Error: ${err.message || err}`);
+      process.exit(1);
+    });
+  return;
+}
+
+if (parsed.isSyncRules) {
+  runSyncRulesCommand(parsed)
+    .then(() => process.exit(0))
+    .catch(() => process.exit(0));
+  return;
+}
+
+if (parsed.isWatchSandbox) {
+  runWatchSandboxCommand(parsed)
+    .then(() => process.exit(0))
+    .catch(() => process.exit(0));
+  return;
 }
 
 if (parsed.isStatus) {
@@ -1326,7 +2101,7 @@ if (parsed.isHook) {
   return;
 }
 
-const STANDARD_TOOLS = [
+const MEMORY_TOOLS = [
   {
     name: "add_memory",
     description:
@@ -1337,6 +2112,30 @@ const STANDARD_TOOLS = [
         text: { type: "string" },
         user_id: { type: "string" },
         memory_id: { type: "string" },
+        metadata: { type: "object" },
+        record_tier: { type: "string", enum: ["fact", "rule"] },
+        slot_key: { type: "string" },
+        scope: { type: "object" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "add_scoped_rule",
+    description:
+      "Store an operational rule or constraint (Tier B) with optional negative contrastive enforcement (DO / DON'T) and execution scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Natural language rule or constraint text" },
+        rule_id: { type: "string", description: "Optional unique rule identifier" },
+        do: { type: "string", description: "Positive behavior statement" },
+        dont: { type: "string", description: "Negative prohibition statement" },
+        scope: {
+          type: "object",
+          description: "Rule scope matching criteria (file_paths, tool_names, environments, git_branches)",
+        },
+        user_id: { type: "string" },
         metadata: { type: "object" },
       },
       required: ["text"],
@@ -1351,8 +2150,28 @@ const STANDARD_TOOLS = [
         query: { type: "string" },
         user_id: { type: "string" },
         limit: { type: "integer", default: 5 },
+        record_tier: { type: "string", enum: ["fact", "rule"] },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "get_cache_aligned_prompt",
+    description:
+      "Retrieve scoped rules and dynamic facts formatted into Zone 1 (static rules) and Zone 2 (dynamic facts) with cache breakpoint delimiter for optimal KV prefix reuse.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_turn: { type: "string", description: "Current user prompt or task turn" },
+        context: {
+          type: "object",
+          description: "Active environment context (file_path, tool_name, environment, git_branch)",
+        },
+        top_k: { type: "integer", default: 5 },
+        user_id: { type: "string" },
+        enable_cache_breakpoint: { type: "boolean", default: true },
+      },
+      required: ["user_turn"],
     },
   },
   {
@@ -1377,6 +2196,9 @@ const STANDARD_TOOLS = [
       required: ["memory_id"],
     },
   },
+];
+
+const CODE_TOOLS = [
   {
     name: "index_repository",
     description:
@@ -1435,11 +2257,13 @@ const STANDARD_TOOLS = [
   },
 ];
 
+const STANDARD_TOOLS = [...MEMORY_TOOLS, ...CODE_TOOLS];
+
 const CODE_MODE_TOOLS = [
   {
     name: "execute_memory_code",
     description:
-      "Compact meta-tool (91% token savings) dispatching memory & code actions (`add_memory`, `search_memories`, `get_memories`, `forget_memory`, `index_repository`, `search_code_by_behavior`, `find_bug_candidates`, `intervene_memory`) to `/ ml` Cloud.",
+      "Compact meta-tool (91% token savings) dispatching memory & code actions (`add_memory`, `add_scoped_rule`, `search_memories`, `get_memories`, `get_cache_aligned_prompt`, `forget_memory`, `index_repository`, `search_code_by_behavior`, `find_bug_candidates`, `intervene_memory`) to `/ ml` Cloud.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1447,13 +2271,16 @@ const CODE_MODE_TOOLS = [
           type: "string",
           enum: [
             "add_memory",
+            "add_scoped_rule",
             "search_memories",
             "get_memories",
+            "get_cache_aligned_prompt",
             "forget_memory",
             "index_repository",
             "search_code_by_behavior",
             "find_bug_candidates",
             "intervene_memory",
+            "dismiss_intervention",
           ],
         },
         params: { type: "object" },
@@ -1642,6 +2469,12 @@ async function dispatchTool(opts, name, args = {}) {
 
   if (name === "add_memory") {
     const rawText = args.text !== undefined ? args.text : args.messages;
+    const meta = {
+      ...(args.metadata || {}),
+      ...(args.record_tier ? { record_tier: String(args.record_tier) } : {}),
+      ...(args.slot_key ? { slot_key: String(args.slot_key) } : {}),
+      ...(args.scope ? { scope: args.scope } : {}),
+    };
     const messagesPayload = Array.isArray(rawText)
       ? rawText
       : [
@@ -1649,14 +2482,38 @@ async function dispatchTool(opts, name, args = {}) {
             role: "user",
             content: String(rawText || ""),
             ...(args.memory_id ? { id: String(args.memory_id) } : {}),
-            ...(args.metadata ? { metadata: args.metadata } : {}),
+            metadata: meta,
           },
         ];
     return apiRequest(opts, "POST", "/v1/memories", {
       messages: messagesPayload,
       user_id: uid,
       memory_id: args.memory_id,
-      metadata: args.metadata || {},
+      metadata: meta,
+      ...(args.record_tier ? { record_tier: String(args.record_tier) } : {}),
+      ...(args.slot_key ? { slot_key: String(args.slot_key) } : {}),
+    });
+  }
+  if (name === "add_scoped_rule") {
+    const text = String(args.text || args.rule || "");
+    const ruleId = args.rule_id || args.ruleId || `rule_${Math.floor(Math.random() * 900000 + 100000)}`;
+    const contrastiveObj = args.contrastive && typeof args.contrastive === "object" ? args.contrastive : {};
+    const doVal = args.do || contrastiveObj.canonical || contrastiveObj.do || text;
+    const dontVal = args.dont || contrastiveObj.negative_pattern || contrastiveObj.dont || "";
+    const meta = {
+      ...(args.metadata || {}),
+      rule_id: ruleId,
+      record_tier: "rule",
+      scope: args.scope || {},
+      contrastive: { do: doVal, dont: dontVal },
+    };
+    return apiRequest(opts, "POST", "/v1/memory/ingest", {
+      text,
+      user_id: uid,
+      record_tier: "rule",
+      slot_key: args.slot_key,
+      documents: [{ text, id: ruleId, user_id: uid, metadata: meta }],
+      metadata: meta,
     });
   }
   if (name === "search_memories") {
@@ -1664,6 +2521,7 @@ async function dispatchTool(opts, name, args = {}) {
     const mergedFilters = {
       ...(args.filters && typeof args.filters === "object" ? args.filters : {}),
       ...(args.include_code !== undefined ? { include_code: Boolean(args.include_code) } : {}),
+      ...(args.record_tier ? { record_tier: String(args.record_tier) } : {}),
       ...(args.kind ? { kind: String(args.kind) } : {}),
     };
     return apiRequest(opts, "POST", "/v1/memories/search", {
@@ -1673,6 +2531,84 @@ async function dispatchTool(opts, name, args = {}) {
       top_k: k,
       ...(Object.keys(mergedFilters).length > 0 ? { filters: mergedFilters } : {}),
     });
+  }
+  if (name === "get_cache_aligned_prompt") {
+    const userTurn = String(args.user_turn || args.query || args.prompt || "");
+    const topK = Number(args.top_k || 5);
+    const resolvedContext = args.context && typeof args.context === "object"
+      ? args.context
+      : {
+          ...(args.active_file ? { file_path: args.active_file } : {}),
+          ...(args.branch ? { git_branch: args.branch } : {}),
+          ...(args.env ? { environment: args.env } : {}),
+        };
+    const rulesRes = await apiRequest(opts, "POST", "/v1/memory/query", {
+      prompt: userTurn,
+      user_id: uid,
+      top_k: 20,
+      record_tier: "rule",
+      context: resolvedContext,
+    });
+    const factsRes = await apiRequest(opts, "POST", "/v1/memory/query", {
+      prompt: userTurn,
+      user_id: uid,
+      top_k: topK,
+      record_tier: "fact",
+    });
+    const rawRules = rulesRes.results || rulesRes.memories || [];
+    const rawFacts = factsRes.results || factsRes.memories || [];
+    const activeRules = rawRules.map((r) => {
+      const rMeta = r.metadata || {};
+      const c = rMeta.contrastive || {};
+      return {
+        rule_id: String(r.id || rMeta.rule_id || "rule"),
+        do: String(c.do || r.text || ""),
+        dont: String(c.dont || ""),
+      };
+    });
+    const zone1Lines = [];
+    if (activeRules.length > 0) {
+      zone1Lines.push("<rules>");
+      for (const r of activeRules) {
+        zone1Lines.push(`  <rule id="${r.rule_id}">\n    <do>${r.do}</do>\n    <dont>${r.dont}</dont>\n  </rule>`);
+      }
+      zone1Lines.push("</rules>");
+    }
+    const zone1Text = zone1Lines.join("\n");
+    const zone2Lines = [];
+    if (rawFacts.length > 0) {
+      zone2Lines.push("<facts>");
+      for (const f of rawFacts) {
+        const t = typeof f === "string" ? f : f.text || f.memory || "";
+        if (t) zone2Lines.push(`  <fact>${t}</fact>`);
+      }
+      zone2Lines.push("</facts>");
+    }
+    const zone2Text = zone2Lines.join("\n");
+    const enableBp = args.enable_cache_breakpoint !== false;
+    const parts = [];
+    if (zone1Text) parts.push(zone1Text);
+    if (enableBp && zone1Text) parts.push("<!-- cache_control: ephemeral_breakpoint -->");
+    if (zone2Text) parts.push(zone2Text);
+    parts.push(userTurn);
+    const fullPrompt = parts.filter(Boolean).join("\n\n");
+    const z1Tok = zone1Text ? Math.max(1, Math.floor(zone1Text.length / 4)) : 0;
+    const z2Tok = zone2Text ? Math.max(1, Math.floor(zone2Text.length / 4)) : 0;
+    const uTok = Math.max(1, Math.floor(userTurn.length / 4));
+    const totTok = z1Tok + z2Tok + uTok;
+    return {
+      full_prompt_text: fullPrompt,
+      zone1_rules_text: zone1Text,
+      zone2_facts_text: zone2Text,
+      has_cache_breakpoint: enableBp && Boolean(zone1Text),
+      token_economics: {
+        zone1_tokens_estimated: z1Tok,
+        zone2_tokens_estimated: z2Tok,
+        user_tokens_estimated: uTok,
+        total_tokens_estimated: totTok,
+        prefix_cache_eligible_ratio: totTok > 0 ? Number((z1Tok / totTok).toFixed(3)) : 0.0,
+      },
+    };
   }
   if (name === "get_memories") {
     const paramsObj = { user_id: uid, limit: String(args.limit || 50) };
@@ -1757,6 +2693,11 @@ async function dispatchTool(opts, name, args = {}) {
       args.project_id || args.projectId || process.env.SLASHML_PROJECT_ID || undefined;
     const resolvedSessionId =
       args.session_id || args.sessionId || process.env.SLASHML_SESSION_ID || undefined;
+    const overriddenIds = [
+      ...(Array.isArray(args.overridden_memory_ids) ? args.overridden_memory_ids : []),
+      ...(Array.isArray(args.dismiss_memory_ids) ? args.dismiss_memory_ids : []),
+      ...(args.override_memory_id ? [String(args.override_memory_id)] : []),
+    ].filter(Boolean);
     return apiRequest(opts, "POST", "/v1/memory/intervene", {
       hook_event_name: args.hook_event_name || "UserPromptSubmit",
       prompt: args.prompt || rawText,
@@ -1764,6 +2705,7 @@ async function dispatchTool(opts, name, args = {}) {
       tool_name: args.tool_name || null,
       tool_input: args.tool_input || null,
       tool_response: args.tool_response || null,
+      ...(overriddenIds.length > 0 ? { overridden_memory_ids: overriddenIds } : {}),
       model: args.model || process.env.SLASHML_MODEL || undefined,
       user_id: uid,
       ...(resolvedProjectId ? { project_id: String(resolvedProjectId) } : {}),
@@ -1771,6 +2713,72 @@ async function dispatchTool(opts, name, args = {}) {
       commit_writes: args.commit_writes !== undefined ? Boolean(args.commit_writes) : true,
       top_k: Number(args.top_k || args.limit || 5),
     });
+  }
+  if (name === "dismiss_intervention") {
+    const memIds = [
+      ...(args.memory_id ? [String(args.memory_id)] : []),
+      ...(Array.isArray(args.memory_ids) ? args.memory_ids.map(String) : []),
+      ...(Array.isArray(args.overridden_memory_ids) ? args.overridden_memory_ids.map(String) : []),
+    ].filter(Boolean);
+    if (memIds.length === 0) {
+      throw new Error("dismiss_intervention requires memory_id or memory_ids");
+    }
+    const reason = String(args.reason || "Dismissed false-positive intervention for session");
+    const dedupPath =
+      process.env.SLASHML_HOOK_STATE_PATH ||
+      path.join(os.homedir(), ".slashml", "hook_state.json");
+    try {
+      let dedupState = { hashes: [] };
+      if (fs.existsSync(dedupPath)) {
+        dedupState = JSON.parse(fs.readFileSync(dedupPath, "utf8")) || { hashes: [] };
+      }
+      if (!dedupState.overridden_by_session || typeof dedupState.overridden_by_session !== "object") {
+        dedupState.overridden_by_session = {};
+      }
+      const prevGlobal = Array.isArray(dedupState.overridden_by_session._global)
+        ? dedupState.overridden_by_session._global
+        : [];
+      dedupState.overridden_by_session._global = Array.from(
+        new Set([...prevGlobal, ...memIds])
+      ).slice(-64);
+      const sessKey = String(args.session_id || args.sessionId || process.env.SLASHML_SESSION_ID || "").trim();
+      if (sessKey) {
+        const prevSess = Array.isArray(dedupState.overridden_by_session[sessKey])
+          ? dedupState.overridden_by_session[sessKey]
+          : [];
+        dedupState.overridden_by_session[sessKey] = Array.from(
+          new Set([...prevSess, ...memIds])
+        ).slice(-64);
+      }
+      fs.mkdirSync(path.dirname(dedupPath), { recursive: true });
+      fs.writeFileSync(dedupPath, JSON.stringify(dedupState), "utf8");
+    } catch {
+      // ignore local state persistence error
+    }
+    const resolvedProjectId =
+      args.project_id || args.projectId || process.env.SLASHML_PROJECT_ID || undefined;
+    const resolvedSessionId =
+      args.session_id || args.sessionId || process.env.SLASHML_SESSION_ID || undefined;
+    try {
+      await apiRequest(opts, "POST", "/v1/memory/intervene", {
+        hook_event_name: "UserPromptSubmit",
+        prompt: `Dismiss intervention for ${memIds.join(", ")}: ${reason}`,
+        text: `Dismiss intervention for ${memIds.join(", ")}: ${reason}`,
+        overridden_memory_ids: memIds,
+        dismiss_memory_ids: memIds,
+        commit_writes: false,
+        user_id: uid,
+        ...(resolvedProjectId ? { project_id: String(resolvedProjectId) } : {}),
+        ...(resolvedSessionId ? { session_id: String(resolvedSessionId) } : {}),
+      });
+    } catch {
+      // local hook_state override is already persisted
+    }
+    return {
+      status: "dismissed",
+      overridden_memory_ids: memIds,
+      reason,
+    };
   }
   throw new Error(`Unknown MCP tool: ${name}`);
 }
@@ -1831,7 +2839,7 @@ rl.on("line", (line) => {
         const tools = parsed.codeMode
           ? CODE_MODE_TOOLS
           : parsed.codeOnly
-            ? STANDARD_TOOLS.slice(4)
+            ? CODE_TOOLS
             : parsed.passiveWrites
               ? STANDARD_TOOLS.filter((t) => t.name !== "add_memory")
               : STANDARD_TOOLS;
@@ -1841,11 +2849,16 @@ rl.on("line", (line) => {
       if (method === "tools/call") {
         try {
           const result = await dispatchTool(parsed, params?.name, params?.arguments);
+          const contentBlocks = [{ type: "text", text: JSON.stringify(result) }];
+          const pendingIntervention = drainPendingSandboxIntervention();
+          if (pendingIntervention) {
+            contentBlocks.push({ type: "text", text: pendingIntervention });
+          }
           process.stdout.write(
             JSON.stringify({
               jsonrpc: "2.0",
               id,
-              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
+              result: { content: contentBlocks },
             }) + "\n"
           );
         } catch (err) {

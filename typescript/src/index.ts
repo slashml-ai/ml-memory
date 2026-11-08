@@ -23,6 +23,189 @@ export interface MemoryClientOptions {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
+ 
+export interface RuleScopePattern {
+  file_paths?: string[];
+  tool_names?: string[];
+  environments?: string[];
+  git_branches?: string[];
+}
+
+export class RuleScope {
+  public file_paths: string[];
+  public tool_names: string[];
+  public environments: string[];
+  public git_branches: string[];
+
+  constructor(patterns: RuleScopePattern = {}) {
+    this.file_paths = patterns.file_paths ?? [];
+    this.tool_names = patterns.tool_names ?? [];
+    this.environments = patterns.environments ?? [];
+    this.git_branches = patterns.git_branches ?? [];
+  }
+
+  public matches(context?: Record<string, unknown> | null): boolean {
+    if (!context) return true;
+    const hasAnyConstraint =
+      this.file_paths.length > 0 ||
+      this.tool_names.length > 0 ||
+      this.environments.length > 0 ||
+      this.git_branches.length > 0;
+    if (!hasAnyConstraint) return true;
+
+    if (this.file_paths.length > 0 && context.file_path) {
+      const p = String(context.file_path).toLowerCase();
+      if (!this.file_paths.some((pattern) => p.includes(pattern.toLowerCase()))) return false;
+    }
+    if (this.tool_names.length > 0 && context.tool_name) {
+      const t = String(context.tool_name).toLowerCase();
+      if (!this.tool_names.some((tn) => tn.toLowerCase() === t)) return false;
+    }
+    if (this.environments.length > 0 && context.environment) {
+      const e = String(context.environment).toLowerCase();
+      if (!this.environments.some((env) => env.toLowerCase() === e)) return false;
+    }
+    if (this.git_branches.length > 0 && context.git_branch) {
+      const b = String(context.git_branch).toLowerCase();
+      if (!this.git_branches.some((br) => br.toLowerCase() === b)) return false;
+    }
+    return true;
+  }
+
+  public toJSON(): Record<string, string[]> {
+    return {
+      file_paths: this.file_paths,
+      tool_names: this.tool_names,
+      environments: this.environments,
+      git_branches: this.git_branches,
+    };
+  }
+}
+
+export interface ContrastiveRuleTriplet {
+  rule_id: string;
+  do: string;
+  dont: string;
+  context?: string;
+  scope?: RuleScope | RuleScopePattern;
+  raw_text?: string;
+}
+
+export interface CacheAlignedPromptResult {
+  zone1_rules_text: string;
+  zone2_facts_text: string;
+  user_turn: string;
+  whisper_block: string;
+  full_prompt_text: string;
+  has_cache_breakpoint: boolean;
+  token_economics: Record<string, unknown>;
+}
+
+export function extractCanonicalSlotKey(
+  text: string,
+  metadata?: Record<string, unknown> | null,
+): string | null {
+  if (metadata && metadata.slot_key) {
+    return String(metadata.slot_key).trim().toLowerCase();
+  }
+  return null;
+}
+
+export function compileContrastiveRule(
+  text: string,
+  ruleId?: string,
+  scope?: RuleScope | RuleScopePattern,
+  options?: { do?: string; dont?: string },
+): ContrastiveRuleTriplet {
+  const cleanText = text.trim();
+  const rid = ruleId || `rule_${Math.floor(Math.random() * 900000 + 100000)}`;
+  const parsedScope = scope instanceof RuleScope ? scope : new RuleScope(scope);
+
+  return {
+    rule_id: rid,
+    do: options?.do || cleanText,
+    dont: options?.dont || "",
+    scope: parsedScope,
+    raw_text: cleanText,
+  };
+}
+
+export function formatCacheAlignedPrompt(
+  rules: ContrastiveRuleTriplet[],
+  facts: Array<string | { text?: string; memory?: string }>,
+  userPrompt: string,
+  options: {
+    activeContext?: Record<string, unknown>;
+    whisperRule?: ContrastiveRuleTriplet | null;
+    enableCacheBreakpoint?: boolean;
+  } = {},
+): CacheAlignedPromptResult {
+  const activeContext = options.activeContext;
+  const enableCacheBreakpoint = options.enableCacheBreakpoint ?? true;
+
+  const activeRules = rules.filter((r) => {
+    if (!r.scope) return true;
+    const scopeObj = r.scope instanceof RuleScope ? r.scope : new RuleScope(r.scope);
+    return scopeObj.matches(activeContext);
+  });
+
+  const zone1Lines: string[] = [];
+  if (activeRules.length > 0) {
+    zone1Lines.push("<rules>");
+    for (const r of activeRules) {
+      zone1Lines.push(`  <rule id="${r.rule_id}">\n    <do>${r.do}</do>\n    <dont>${r.dont}</dont>\n  </rule>`);
+    }
+    zone1Lines.push("</rules>");
+  }
+  const zone1Text = zone1Lines.join("\n");
+
+  const zone2Lines: string[] = [];
+  if (facts.length > 0) {
+    zone2Lines.push("<facts>");
+    for (const f of facts) {
+      const fText = typeof f === "string" ? f : f?.text ?? f?.memory ?? "";
+      if (fText) {
+        zone2Lines.push(`  <fact>${fText}</fact>`);
+      }
+    }
+    zone2Lines.push("</facts>");
+  }
+  const zone2Text = zone2Lines.join("\n");
+
+  let whisperText = "";
+  if (options.whisperRule) {
+    whisperText = `<whisper>\n  [CRITICAL CONSTRAINT ACTIVE]\n  DO: ${options.whisperRule.do}\n  DON'T: ${options.whisperRule.dont}\n</whisper>`;
+  }
+
+  const parts: string[] = [];
+  if (zone1Text) parts.push(zone1Text);
+  if (enableCacheBreakpoint && zone1Text) parts.push("<!-- cache_control: ephemeral_breakpoint -->");
+  if (zone2Text) parts.push(zone2Text);
+  if (whisperText) parts.push(whisperText);
+  parts.push(userPrompt);
+
+  const fullPrompt = parts.filter(Boolean).join("\n\n");
+  const z1Tok = zone1Text ? Math.max(1, Math.floor(zone1Text.length / 4)) : 0;
+  const z2Tok = zone2Text ? Math.max(1, Math.floor(zone2Text.length / 4)) : 0;
+  const uTok = Math.max(1, Math.floor(userPrompt.length / 4));
+  const totTok = z1Tok + z2Tok + uTok;
+
+  return {
+    zone1_rules_text: zone1Text,
+    zone2_facts_text: zone2Text,
+    user_turn: userPrompt,
+    whisper_block: whisperText,
+    full_prompt_text: fullPrompt,
+    has_cache_breakpoint: enableCacheBreakpoint && Boolean(zone1Text),
+    token_economics: {
+      zone1_tokens_estimated: z1Tok,
+      zone2_tokens_estimated: z2Tok,
+      user_tokens_estimated: uTok,
+      total_tokens_estimated: totTok,
+      prefix_cache_eligible_ratio: totTok > 0 ? Number((z1Tok / totTok).toFixed(3)) : 0.0,
+    },
+  };
+}
 
 export interface MemoryFilters {
   user_id?: string | null;
@@ -41,6 +224,12 @@ export interface AddMemoryOptions extends MemoryFilters {
   infer?: boolean;
   memory_id?: string;
   memoryId?: string;
+  record_tier?: string;
+  recordTier?: string;
+  slot_key?: string;
+  slotKey?: string;
+  scope?: RuleScope | RuleScopePattern;
+  contrastive?: ContrastiveRuleTriplet;
 }
 
 export interface SearchMemoryOptions extends MemoryFilters {
@@ -48,18 +237,30 @@ export interface SearchMemoryOptions extends MemoryFilters {
   top_k?: number;
   topK?: number;
   threshold?: number;
+  record_tier?: string;
+  recordTier?: string;
 }
 
 export interface IngestOptions {
   namespace?: string;
   model?: string;
   metadata?: Record<string, unknown>;
+  record_tier?: string;
+  recordTier?: string;
+  slot_key?: string;
+  slotKey?: string;
+  scope?: RuleScope | RuleScopePattern;
+  contrastive?: ContrastiveRuleTriplet;
 }
 
 export interface QueryOptions {
   namespace?: string;
   model?: string;
   top_k?: number;
+  record_tier?: string;
+  recordTier?: string;
+  context?: Record<string, unknown>;
+  include_rules?: boolean;
 }
 
 export interface ForgetOptions {
@@ -126,8 +327,9 @@ export class SlashMLAPIError extends Error {
 }
 
 function getEnv(name: string): string | undefined {
-  if (typeof process !== "undefined" && process.env) {
-    return process.env[name];
+  const proc = (globalThis as any).process;
+  if (typeof proc !== "undefined" && proc && proc.env) {
+    return proc.env[name];
   }
   return undefined;
 }
@@ -329,7 +531,7 @@ export class MemoryClient {
     const headers: Record<string, string> = {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "User-Agent": "slashml-memory-ts/1.0.8",
+      "User-Agent": "slashml-memory-ts/1.0.10",
     };
     if (this.apiKey) {
       headers.Authorization = `Bearer ${this.apiKey}`;
@@ -394,12 +596,32 @@ export class MemoryClient {
     options: IngestOptions = {},
   ): Promise<Record<string, unknown>> {
     const docs = typeof documents === "string" ? [documents] : Array.from(documents);
+    const meta: Record<string, unknown> = { ...(options.metadata ?? {}) };
+    const effectiveTier = options.record_tier ?? options.recordTier ?? meta.record_tier ?? meta.tier;
+    if (effectiveTier) meta.record_tier = String(effectiveTier);
+    let effectiveSlot = options.slot_key ?? options.slotKey ?? meta.slot_key;
+    if (!effectiveSlot && typeof documents === "string") {
+      effectiveSlot = extractCanonicalSlotKey(documents, meta) ?? undefined;
+    }
+    if (effectiveSlot) meta.slot_key = String(effectiveSlot);
+    if (options.scope) {
+      meta.scope = options.scope instanceof RuleScope ? options.scope.toJSON() : options.scope;
+    }
+    if (options.contrastive) {
+      meta.contrastive = {
+        do: options.contrastive.do,
+        dont: options.contrastive.dont,
+        context: options.contrastive.context,
+      };
+    }
     return this.request("POST", "/v1/memory/ingest", {
       jsonBody: {
         namespace: options.namespace ?? "default",
         model: options.model ?? this.model,
         documents: docs,
-        metadata: options.metadata ?? {},
+        metadata: meta,
+        ...(meta.record_tier ? { record_tier: meta.record_tier } : {}),
+        ...(meta.slot_key ? { slot_key: meta.slot_key } : {}),
       },
     });
   }
@@ -408,13 +630,19 @@ export class MemoryClient {
     prompt: string,
     options: QueryOptions = {},
   ): Promise<Record<string, unknown>> {
+    const payload: Record<string, unknown> = {
+      namespace: options.namespace ?? "default",
+      model: options.model ?? this.model,
+      prompt,
+      query: prompt,
+      top_k: options.top_k ?? 5,
+    };
+    const effectiveTier = options.record_tier ?? options.recordTier;
+    if (effectiveTier) payload.record_tier = String(effectiveTier);
+    if (options.context) payload.context = options.context;
+    if (options.include_rules !== undefined) payload.include_rules = Boolean(options.include_rules);
     return this.request("POST", "/v1/memory/query", {
-      jsonBody: {
-        namespace: options.namespace ?? "default",
-        model: options.model ?? this.model,
-        prompt,
-        top_k: options.top_k ?? 5,
-      },
+      jsonBody: payload,
     });
   }
 
@@ -497,6 +725,113 @@ export class MemoryClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Phase 30 Dual-Tier & Prompt-Cache Features
+  // ---------------------------------------------------------------------------
+
+  public async addRule(
+    text: string,
+    options: {
+      rule_id?: string;
+      ruleId?: string;
+      do?: string;
+      dont?: string;
+      scope?: RuleScope | RuleScopePattern;
+      user_id?: string;
+      userId?: string;
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const compiled = compileContrastiveRule(text, options.rule_id || options.ruleId, options.scope);
+    if (options.do) compiled.do = options.do;
+    if (options.dont) compiled.dont = options.dont;
+    const meta: Record<string, unknown> = {
+      ...(options.metadata ?? {}),
+      rule_id: compiled.rule_id,
+      scope: compiled.scope instanceof RuleScope ? compiled.scope.toJSON() : compiled.scope,
+      contrastive: { do: compiled.do, dont: compiled.dont },
+      record_tier: "rule",
+    };
+    return this.ingest(text, {
+      record_tier: "rule",
+      metadata: meta,
+      scope: compiled.scope,
+      contrastive: compiled,
+    });
+  }
+
+  public async add_rule(
+    text: string,
+    options: {
+      rule_id?: string;
+      ruleId?: string;
+      do?: string;
+      dont?: string;
+      scope?: RuleScope | RuleScopePattern;
+      user_id?: string;
+      userId?: string;
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    return this.addRule(text, options);
+  }
+
+  public async getCacheAlignedPrompt(
+    userTurn: string,
+    options: {
+      activeContext?: Record<string, unknown>;
+      top_k?: number;
+      userId?: string;
+      user_id?: string;
+      enableCacheBreakpoint?: boolean;
+    } = {},
+  ): Promise<CacheAlignedPromptResult> {
+    const rulesRes = await this.query(userTurn, {
+      top_k: 20,
+      record_tier: "rule",
+      context: options.activeContext,
+    });
+    const rawRules = (rulesRes?.results as any[]) || (rulesRes?.memories as any[]) || [];
+    const rulesList: ContrastiveRuleTriplet[] = rawRules.map((r: any) => {
+      const rMeta = r.metadata || {};
+      const cInfo = rMeta.contrastive || {};
+      const sInfo = rMeta.scope || {};
+      return {
+        rule_id: String(r.id || rMeta.rule_id || "rule"),
+        do: String(cInfo.do || r.text || ""),
+        dont: String(cInfo.dont || ""),
+        context: String(cInfo.context || ""),
+        scope: new RuleScope(sInfo),
+        raw_text: String(r.text || ""),
+      };
+    });
+
+    const factsRes = await this.query(userTurn, {
+      top_k: options.top_k || 5,
+      record_tier: "fact",
+    });
+    const rawFacts = (factsRes?.results as any[]) || (factsRes?.memories as any[]) || [];
+    const factsList = rawFacts.map((f: any) => String(f.text || f.memory || ""));
+
+    return formatCacheAlignedPrompt(rulesList, factsList, userTurn, {
+      activeContext: options.activeContext,
+      enableCacheBreakpoint: options.enableCacheBreakpoint ?? true,
+    });
+  }
+
+  public async get_cache_aligned_prompt(
+    userTurn: string,
+    options: {
+      activeContext?: Record<string, unknown>;
+      top_k?: number;
+      userId?: string;
+      user_id?: string;
+      enableCacheBreakpoint?: boolean;
+    } = {},
+  ): Promise<CacheAlignedPromptResult> {
+    return this.getCacheAlignedPrompt(userTurn, options);
+  }
+
+  // ---------------------------------------------------------------------------
   // Mem0-Compatible REST Endpoints (/v1/memories/*)
   // ---------------------------------------------------------------------------
 
@@ -511,6 +846,24 @@ export class MemoryClient {
         : Array.isArray(messages)
           ? messages
           : [messages];
+    const meta: Record<string, unknown> = { ...(options.metadata ?? {}) };
+    const effectiveTier = options.record_tier ?? options.recordTier ?? meta.record_tier ?? meta.tier;
+    if (effectiveTier) meta.record_tier = String(effectiveTier);
+    let effectiveSlot = options.slot_key ?? options.slotKey ?? meta.slot_key;
+    if (!effectiveSlot && typeof messages === "string") {
+      effectiveSlot = extractCanonicalSlotKey(messages, meta) ?? undefined;
+    }
+    if (effectiveSlot) meta.slot_key = String(effectiveSlot);
+    if (options.scope) {
+      meta.scope = options.scope instanceof RuleScope ? options.scope.toJSON() : options.scope;
+    }
+    if (options.contrastive) {
+      meta.contrastive = {
+        do: options.contrastive.do,
+        dont: options.contrastive.dont,
+        context: options.contrastive.context,
+      };
+    }
     const payload: Record<string, unknown> = {
       messages: normalizedMessages,
       ...(typeof messages === "string" ? { text: messages } : {}),
@@ -518,7 +871,9 @@ export class MemoryClient {
       agent_id: options.agent_id ?? options.agentId ?? null,
       app_id: options.app_id ?? options.appId ?? null,
       run_id: options.run_id ?? options.runId ?? null,
-      metadata: options.metadata ?? {},
+      metadata: meta,
+      ...(meta.record_tier ? { record_tier: meta.record_tier } : {}),
+      ...(meta.slot_key ? { slot_key: meta.slot_key } : {}),
       infer: options.infer ?? true,
       model: this.model,
     };

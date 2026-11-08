@@ -1,0 +1,14 @@
+{
+  "name": "@slashml/robotics",
+  "version": "1.0.1",
+  "type": "module",
+  "description": "Official TypeScript/Web SDK for SlashML Robotics spatial memory",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "keywords": ["slashml", "robotics", "spatial-memory", "embodied-ai", "ros2"],
+  "license": "Apache-2.0"
+}

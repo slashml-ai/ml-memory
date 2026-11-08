@@ -12,6 +12,7 @@ This directory contains all **publicly published, open-source (`Apache-2.0`) cli
 | [`typescript/`](./typescript) | `@slashml/memory` | npm | `Apache-2.0` | Official HTTP TypeScript/Node.js SDK (`SlashMLMemory`, `MemoryClient`, `AsyncMemoryClient`, `Memory`, `AsyncMemory` 100% Mem0 drop-in) + CLI (`npx @slashml/memory`) |
 | [`vercel-ai-provider/`](./vercel-ai-provider) | `@slashml/vercel-ai-provider` | npm | `Apache-2.0` | Vercel AI SDK Provider (`createSlashML`, `createMem0`, `slashml`, `mem0`, `retrieveMemories`, `addMemories`, `getMemories`, `searchMemories`) -- drop-in replacement for `@mem0/vercel-ai-provider` |
 | [`mcp/`](./mcp) | `@slashml/mcp` | npm | `Apache-2.0` | Standalone local MCP stdio server (`slashml-mcp` and `slashml-mcp-code` for Claude Code, Cursor, Windsurf, Cline, Zed) |
+| [`robotics/`](./robotics) | `slashml-robotics` / `@slashml/robotics` | PyPI / npm / CMake / Cargo | `Apache-2.0` | Spatial memory and 6-DoF belief-tracking clients for Python, C++17, Rust, TypeScript, ROS 2, and MCP |
 | [`eval/`](./eval) | `slashml-eval` | PyPI | `Apache-2.0` | Public benchmark harness CLI (`slashml-eval`) for LongMemEval, LoCoMo, and ConvoMem via the SlashML Cloud API |
 | [`LICENSE`](./LICENSE) | -- | Docs | `Apache-2.0` | Apache-2.0 open-source license for the public client packages |
 

@@ -37,13 +37,14 @@ npx -y @slashml/mcp --install-hooks --api-key "$SLASHML_API_KEY"
 ```
 
 ## Available Tools (Standard Mode)
-1. `add_memory` -- Store a persistent conversational memory, user preference, or operational rule.
-2. `search_memories` -- Search stored conversational memories, user preferences, and facts.
-3. `get_memories` -- List conversational memories for a user/agent scope.
-4. `forget_memory` -- Delete a specific memory by ID.
+1. `search_memories` -- Search stored conversational memories, user preferences, and facts.
+2. `get_memories` -- List conversational memories for a user/agent scope.
+3. `forget_memory` -- Delete a specific memory by ID.
+4. `dismiss_intervention` -- Record that an active pre-tool intervention was a false positive or superseded for the current target.
 5. `index_repository` -- Index a git repository for code search and bug localization.
 6. `search_code_by_behavior` -- Search indexed repository symbols by behavioral or architectural description.
 7. `find_bug_candidates` -- Rank likely bug locations across a repository from symptoms and stack traces.
+8. `add_memory` *(opt-in via `--enable-write-tool`; ambient lifecycle hooks assimilate memories automatically by default)* -- Explicitly store a persistent conversational memory, user preference, or operational rule.
 
 ## License
 Apache-2.0. Connects to the SlashML Cloud Service (`https://api.slashml.ai`).

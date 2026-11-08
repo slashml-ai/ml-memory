@@ -265,13 +265,16 @@ class SlashMLMCPServer:
                                 "type": "string",
                                 "enum": [
                                     "add_memory",
+                                    "add_scoped_rule",
                                     "search_memories",
                                     "get_memories",
+                                    "get_cache_aligned_prompt",
                                     "forget_memory",
                                     "index_repository",
                                     "search_code_by_behavior",
                                     "find_bug_candidates",
                                     "intervene_memory",
+                                    "dismiss_intervention",
                                 ],
                             },
                             "params": {"type": "object"},
@@ -348,6 +351,32 @@ class SlashMLMCPServer:
                         "user_id": {"type": "string"},
                         "memory_id": {"type": "string"},
                         "metadata": {"type": "object"},
+                        "record_tier": {"type": "string", "enum": ["fact", "rule"]},
+                        "slot_key": {"type": "string"},
+                        "scope": {"type": "object"},
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "add_scoped_rule",
+                "description": (
+                    "Store an operational rule or constraint (Tier B) with optional negative "
+                    "contrastive enforcement (DO / DON'T) and execution scope."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Natural language rule or constraint text"},
+                        "rule_id": {"type": "string", "description": "Optional unique rule identifier"},
+                        "do": {"type": "string", "description": "Positive behavior statement"},
+                        "dont": {"type": "string", "description": "Negative prohibition statement"},
+                        "scope": {
+                            "type": "object",
+                            "description": "Rule scope matching criteria (file_paths, tool_names, environments, git_branches)",
+                        },
+                        "user_id": {"type": "string"},
+                        "metadata": {"type": "object"},
                     },
                     "required": ["text"],
                 },
@@ -365,9 +394,31 @@ class SlashMLMCPServer:
                         "user_id": {"type": "string"},
                         "limit": {"type": "integer", "default": 5},
                         "include_code": {"type": "boolean", "default": False},
+                        "record_tier": {"type": "string", "enum": ["fact", "rule"]},
                         "filters": {"type": "object"},
                     },
                     "required": ["query"],
+                },
+            },
+            {
+                "name": "get_cache_aligned_prompt",
+                "description": (
+                    "Retrieve scoped rules and dynamic facts formatted into Zone 1 (static rules) "
+                    "and Zone 2 (dynamic facts) with cache breakpoint delimiter for optimal KV prefix reuse."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "user_turn": {"type": "string", "description": "Current user prompt or task turn"},
+                        "context": {
+                            "type": "object",
+                            "description": "Active environment context (file_path, tool_name, environment, git_branch)",
+                        },
+                        "top_k": {"type": "integer", "default": 5},
+                        "user_id": {"type": "string"},
+                        "enable_cache_breakpoint": {"type": "boolean", "default": True},
+                    },
+                    "required": ["user_turn"],
                 },
             },
             {
@@ -410,10 +461,31 @@ class SlashMLMCPServer:
         uid = str(args.get("user_id") or self.user_id)
 
         if name == "add_memory":
+            extra_kwargs: dict[str, Any] = {}
+            if "record_tier" in args:
+                extra_kwargs["record_tier"] = args["record_tier"]
+            if "slot_key" in args:
+                extra_kwargs["slot_key"] = args["slot_key"]
+            if "scope" in args:
+                extra_kwargs["scope"] = args["scope"]
             res = self.client.add(
                 str(args["text"]),
                 user_id=uid,
                 memory_id=args.get("memory_id"),
+                metadata=args.get("metadata"),
+                **extra_kwargs,
+            )
+            return {"content": [{"type": "text", "text": json.dumps(res)}]}
+
+        if name == "add_scoped_rule":
+            raw_text = str(args.get("text") or args.get("rule") or "")
+            res = self.client.add_rule(
+                raw_text,
+                rule_id=args.get("rule_id"),
+                do=args.get("do"),
+                dont=args.get("dont"),
+                scope=args.get("scope"),
+                user_id=uid,
                 metadata=args.get("metadata"),
             )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
@@ -422,6 +494,8 @@ class SlashMLMCPServer:
             merged_filters: dict[str, Any] = dict(args.get("filters") or {})
             if "include_code" in args and args["include_code"] is not None:
                 merged_filters["include_code"] = bool(args["include_code"])
+            if "record_tier" in args and args["record_tier"] is not None:
+                merged_filters["record_tier"] = str(args["record_tier"])
             res = self.client.search(
                 str(args["query"]),
                 user_id=uid,
@@ -429,6 +503,32 @@ class SlashMLMCPServer:
                 filters=merged_filters if merged_filters else None,
             )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
+
+        if name == "get_cache_aligned_prompt":
+            turn = str(args.get("user_turn") or args.get("query") or args.get("prompt") or "")
+            ctx = args.get("context")
+            if not ctx or not isinstance(ctx, dict):
+                ctx = {
+                    k: v
+                    for k, v in args.items()
+                    if k not in ("user_turn", "query", "prompt", "top_k", "user_id", "enable_cache_breakpoint")
+                }
+            aligned = self.client.get_cache_aligned_prompt(
+                turn,
+                active_context=ctx,
+                top_k=int(args.get("top_k", 5)),
+                user_id=uid,
+                enable_cache_breakpoint=bool(args.get("enable_cache_breakpoint", True)),
+            )
+            out = {
+                "full_prompt_text": aligned.full_prompt_text,
+                "zone1_rules_text": aligned.zone1_rules_text,
+                "zone2_facts_text": aligned.zone2_facts_text,
+                "whisper_block": aligned.whisper_block,
+                "has_cache_breakpoint": aligned.has_cache_breakpoint,
+                "token_economics": aligned.token_economics,
+            }
+            return {"content": [{"type": "text", "text": json.dumps(out)}]}
 
         if name == "get_memories":
             merged_filters = dict(args.get("filters") or {})
@@ -483,6 +583,15 @@ class SlashMLMCPServer:
                 or args.get("sessionId")
                 or os.environ.get("SLASHML_SESSION_ID")
             )
+            overridden_ids = [
+                str(x)
+                for x in [
+                    *(args.get("overridden_memory_ids") or []),
+                    *(args.get("dismiss_memory_ids") or []),
+                    *([args["override_memory_id"]] if args.get("override_memory_id") else []),
+                ]
+                if x
+            ]
             res = self.client.intervene(
                 raw_text,
                 hook_event_name=str(args.get("hook_event_name") or "UserPromptSubmit"),
@@ -490,6 +599,7 @@ class SlashMLMCPServer:
                 tool_name=args.get("tool_name"),
                 tool_input=args.get("tool_input"),
                 tool_response=args.get("tool_response"),
+                overridden_memory_ids=overridden_ids or None,
                 user_id=uid,
                 project_id=str(resolved_project) if resolved_project else None,
                 session_id=str(resolved_session) if resolved_session else None,
@@ -498,6 +608,71 @@ class SlashMLMCPServer:
                 top_k=int(args.get("top_k") or args.get("limit") or 5),
             )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
+
+        if name == "dismiss_intervention":
+            mem_ids = [
+                str(x)
+                for x in [
+                    *([args["memory_id"]] if args.get("memory_id") else []),
+                    *(args.get("memory_ids") or []),
+                    *(args.get("overridden_memory_ids") or []),
+                ]
+                if x
+            ]
+            if not mem_ids:
+                raise ValueError("dismiss_intervention requires memory_id or memory_ids")
+            reason = str(args.get("reason") or "Dismissed false-positive intervention for session")
+            dedup_path = Path(
+                os.environ.get("SLASHML_HOOK_STATE_PATH")
+                or (Path.home() / ".slashml" / "hook_state.json")
+            )
+            try:
+                dedup_state: dict[str, Any] = {"hashes": []}
+                if dedup_path.exists():
+                    dedup_state = json.loads(dedup_path.read_text(encoding="utf-8")) or {"hashes": []}
+                ov_map = dedup_state.get("overridden_by_session")
+                if not isinstance(ov_map, dict):
+                    ov_map = {}
+                    dedup_state["overridden_by_session"] = ov_map
+                prev_glob = ov_map.get("_global") if isinstance(ov_map.get("_global"), list) else []
+                ov_map["_global"] = list(dict.fromkeys([*prev_glob, *mem_ids]))[-64:]
+                sess_key = str(args.get("session_id") or args.get("sessionId") or os.environ.get("SLASHML_SESSION_ID") or "").strip()
+                if sess_key:
+                    prev_s = ov_map.get(sess_key) if isinstance(ov_map.get(sess_key), list) else []
+                    ov_map[sess_key] = list(dict.fromkeys([*prev_s, *mem_ids]))[-64:]
+                dedup_path.parent.mkdir(parents=True, exist_ok=True)
+                dedup_path.write_text(json.dumps(dedup_state), encoding="utf-8")
+            except Exception:
+                pass
+            resolved_project = args.get("project_id") or args.get("projectId") or os.environ.get("SLASHML_PROJECT_ID")
+            resolved_session = args.get("session_id") or args.get("sessionId") or os.environ.get("SLASHML_SESSION_ID")
+            try:
+                self.client.intervene(
+                    f"Dismiss intervention for {', '.join(mem_ids)}: {reason}",
+                    hook_event_name="UserPromptSubmit",
+                    overridden_memory_ids=mem_ids,
+                    dismiss_memory_ids=mem_ids,
+                    user_id=uid,
+                    project_id=str(resolved_project) if resolved_project else None,
+                    session_id=str(resolved_session) if resolved_session else None,
+                    commit_writes=False,
+                )
+            except Exception:
+                pass
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "status": "dismissed",
+                                "overridden_memory_ids": mem_ids,
+                                "reason": reason,
+                            }
+                        ),
+                    }
+                ]
+            }
 
         raise ValueError(f"Unknown MCP tool: {name!r}")
 
@@ -523,7 +698,7 @@ class SlashMLMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": proto,
-                    "serverInfo": {"name": "ml-memory", "version": "1.0.8"},
+                    "serverInfo": {"name": "ml-memory", "version": "1.0.10"},
                     "capabilities": {"tools": {}},
                 },
             }
@@ -911,7 +1086,9 @@ def run_ambient_hook_mode(
     tool_summary = (
         tool_in.get("command")
         or tool_in.get("CommandLine")
+        or tool_in.get("Replacement")
         or tool_in.get("new_string")
+        or tool_in.get("Content")
         or tool_in.get("content")
         or json.dumps(tool_in)
         if tool_in
@@ -1044,11 +1221,48 @@ def run_ambient_hook_mode(
     if not isinstance(whispered_blocks_by_session, dict):
         whispered_blocks_by_session = {}
         dedup_state["whispered_blocks_by_session"] = whispered_blocks_by_session
+    blocked_by_session = dedup_state.get("blocked_by_session")
+    if not isinstance(blocked_by_session, dict):
+        blocked_by_session = {}
+        dedup_state["blocked_by_session"] = blocked_by_session
+    overridden_by_session = dedup_state.get("overridden_by_session")
+    if not isinstance(overridden_by_session, dict):
+        overridden_by_session = {}
+        dedup_state["overridden_by_session"] = overridden_by_session
+    blocked_actions_by_session = dedup_state.get("blocked_actions_by_session")
+    if not isinstance(blocked_actions_by_session, dict):
+        blocked_actions_by_session = {}
+        dedup_state["blocked_actions_by_session"] = blocked_actions_by_session
     whisper_key = session_id or scope_state_key
     is_mid_turn_cont = raw_event_name == "PreInvocation" and int(payload.get("invocationNum") or 1) > 1
+    target_sig = (
+        str(
+            tool_in.get("file_path")
+            or tool_in.get("path")
+            or tool_in.get("Path")
+            or tool_in.get("command")
+            or tool_in.get("CommandLine")
+            or delta_text[:120]
+        ).strip().lower()
+        if isinstance(tool_in, dict)
+        else delta_text[:120].lower()
+    )
     if hook_event == "UserPromptSubmit" and not is_mid_turn_cont and whisper_key:
-        whispered_by_session[whisper_key] = []
         whispered_blocks_by_session[whisper_key] = []
+    if hook_event == "PreToolUse" and whisper_key:
+        prev_act = blocked_actions_by_session.get(whisper_key, [])
+        if isinstance(prev_act, list) and prev_act:
+            suffix = f":{tool_name or ''}:{target_sig}"
+            matched_ids = [
+                entry[: -len(suffix)]
+                for entry in prev_act
+                if isinstance(entry, str) and entry.endswith(suffix) and entry[: -len(suffix)]
+            ]
+            if matched_ids:
+                prev_ov = overridden_by_session.get(whisper_key, [])
+                if not isinstance(prev_ov, list):
+                    prev_ov = []
+                overridden_by_session[whisper_key] = list(dict.fromkeys([*prev_ov, *matched_ids]))[-32:]
     session_whispered = (
         [str(x) for x in whispered_by_session.get(whisper_key, []) if x]
         if whisper_key and isinstance(whispered_by_session.get(whisper_key), list)
@@ -1059,6 +1273,14 @@ def run_ambient_hook_mode(
         if whisper_key and isinstance(whispered_blocks_by_session.get(whisper_key), list)
         else []
     )
+    session_overridden = [
+        *(overridden_by_session.get(whisper_key, []) if whisper_key and isinstance(overridden_by_session.get(whisper_key), list) else []),
+        *(overridden_by_session.get("_global", []) if isinstance(overridden_by_session.get("_global"), list) else []),
+        *(payload.get("overridden_memory_ids") if isinstance(payload.get("overridden_memory_ids"), list) else []),
+        *(tool_in.get("override_memory_ids") if isinstance(tool_in, dict) and isinstance(tool_in.get("override_memory_ids"), list) else []),
+        *(tool_in.get("overridden_memory_ids") if isinstance(tool_in, dict) and isinstance(tool_in.get("overridden_memory_ids"), list) else []),
+    ]
+    overridden_memory_ids = list(dict.fromkeys(str(x) for x in session_overridden if x))
     stream_text_for_intervene = (
         f"{chr(10).join(session_whispered_blocks)}\n{delta_text}"
         if hook_event in ("Stop", "PreToolUse")
@@ -1076,6 +1298,7 @@ def run_ambient_hook_mode(
             last_assistant_message=delta_text if hook_event == "Stop" else None,
             stop_hook_active=bool(payload.get("stop_hook_active")) if hook_event == "Stop" else False,
             whispered_memory_ids=session_whispered if session_whispered else None,
+            overridden_memory_ids=overridden_memory_ids if overridden_memory_ids else None,
             tool_name=tool_name,
             tool_input=effective_tool_in,
             tool_response=payload.get("tool_response"),
@@ -1127,6 +1350,17 @@ def run_ambient_hook_mode(
                         prev_w = []
                     merged_w = list(dict.fromkeys([*prev_w, *triggered_ids]))
                     whispered_by_session[whisper_key] = merged_w[-16:]
+                    if resp.get("intervention_severity") == "BLOCK":
+                        prev_blk = blocked_by_session.get(whisper_key, [])
+                        if not isinstance(prev_blk, list):
+                            prev_blk = []
+                        blocked_by_session[whisper_key] = list(dict.fromkeys([*prev_blk, *triggered_ids]))[-16:]
+                        if hook_event == "PreToolUse":
+                            prev_act_list = blocked_actions_by_session.get(whisper_key, [])
+                            if not isinstance(prev_act_list, list):
+                                prev_act_list = []
+                            act_keys = [f"{mid}:{tool_name or ''}:{target_sig}" for mid in triggered_ids]
+                            blocked_actions_by_session[whisper_key] = list(dict.fromkeys([*prev_act_list, *act_keys]))[-32:]
                 int_msg = resp.get("intervention_message")
                 if whisper_key and isinstance(int_msg, str) and int_msg:
                     msg_tags = re.findall(r"<memory>[\s\S]*?</memory>", int_msg, flags=re.IGNORECASE)
@@ -1164,7 +1398,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(prog="slashml-mcp")
     parser.add_argument("command", nargs="?", default=None, help="Optional command (e.g. 'init')")
-    parser.add_argument("-v", "--version", action="version", version="1.0.8")
+    parser.add_argument("-v", "--version", action="version", version="1.0.10")
     parser.add_argument("--init", action="store_true", help="Configure ml-memory MCP in IDE configs")
     parser.add_argument("--skill", default=None, help="Skill or IDE target filter (e.g. ml-memory, cursor)")
     parser.add_argument("--api-key", default=None, help="SlashML Cloud API key (or SLASHML_API_KEY)")

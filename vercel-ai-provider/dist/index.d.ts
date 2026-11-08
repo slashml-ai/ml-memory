@@ -30,6 +30,14 @@ export interface VercelMemoryConfig {
     threshold?: number;
     metadata?: Record<string, unknown>;
     filters?: Record<string, unknown>;
+    record_tier?: "fact" | "rule";
+    recordTier?: "fact" | "rule";
+    slot_key?: string;
+    slotKey?: string;
+    scope?: Record<string, unknown>;
+    contrastive?: Record<string, unknown>;
+    cache_alignment?: boolean;
+    cacheAlignment?: boolean;
     systemPromptPrefix?: string;
     addMemories?: boolean;
     maxRetries?: number;

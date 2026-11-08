@@ -1,6 +1,6 @@
 {
   "name": "@slashml/memory",
-  "version": "1.0.8",
+  "version": "1.0.10",
   "description": "Official HTTP TypeScript & Node.js SDK for / ml (https://api.slashml.ai)",
   "license": "Apache-2.0",
   "homepage": "https://slashml.ai",
@@ -31,6 +31,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "build": "tsc && node -e \"const fs = require('node:fs'); const code = 'import { createRequire } from \\\"node:module\\\";\\nconst require = createRequire(import.meta.url);\\nconst cjs = require(\\\"./index.js\\\");\\n\\nexport const {\\n  DEFAULT_BASE_URL,\\n  DEFAULT_MODEL,\\n  DEFAULT_TIMEOUT_MS,\\n  RuleScope,\\n  SlashMLAPIError,\\n  ProjectManager,\\n  MemoryClient,\\n  Memory,\\n  AsyncMemoryClient,\\n  AsyncMemory,\\n  SlashMLMemory,\\n  SlashMLClient,\\n  AsyncSlashMLMemory,\\n  AsyncSlashMLClient,\\n  extractCanonicalSlotKey,\\n  compileContrastiveRule,\\n  formatCacheAlignedPrompt,\\n} = cjs;\\n\\nexport default cjs;\\n'; fs.writeFileSync('dist/index.mjs', code);\"",
     "test": "node --test test/sdk.test.js"
   },
   "engines": {

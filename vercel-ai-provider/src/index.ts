@@ -35,6 +35,14 @@ export interface VercelMemoryConfig {
   threshold?: number;
   metadata?: Record<string, unknown>;
   filters?: Record<string, unknown>;
+  record_tier?: "fact" | "rule";
+  recordTier?: "fact" | "rule";
+  slot_key?: string;
+  slotKey?: string;
+  scope?: Record<string, unknown>;
+  contrastive?: Record<string, unknown>;
+  cache_alignment?: boolean;
+  cacheAlignment?: boolean;
   systemPromptPrefix?: string;
   addMemories?: boolean;
   maxRetries?: number;
@@ -70,8 +78,9 @@ export interface VercelMessage {
 export type PromptInput = string | VercelMessage[];
 
 function getEnv(name: string): string | undefined {
-  if (typeof process !== "undefined" && process.env) {
-    return process.env[name];
+  const g = globalThis as unknown as { process?: { env?: Record<string, string | undefined> } };
+  if (typeof g.process !== "undefined" && g.process.env) {
+    return g.process.env[name];
   }
   return undefined;
 }

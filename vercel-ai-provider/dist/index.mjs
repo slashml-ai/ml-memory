@@ -9,8 +9,9 @@ export const DEFAULT_BASE_URL = "https://api.slashml.ai";
 export const DEFAULT_SYSTEM_PREFIX = "System Memory Context (User Preferences & Past Facts):";
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
 function getEnv(name) {
-    if (typeof process !== "undefined" && process.env) {
-        return process.env[name];
+    const g = globalThis;
+    if (typeof g.process !== "undefined" && g.process.env) {
+        return g.process.env[name];
     }
     return undefined;
 }

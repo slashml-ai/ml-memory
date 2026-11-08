@@ -1,6 +1,6 @@
 {
   "name": "@slashml/vercel-ai-provider",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Official / ml Memory Provider for the Vercel AI SDK -- 100% drop-in replacement for @mem0/vercel-ai-provider (createSlashML, createMem0, retrieveMemories, addMemories, getMemories)",
   "license": "Apache-2.0",
   "author": "/ ml <support@slashml.ai>",

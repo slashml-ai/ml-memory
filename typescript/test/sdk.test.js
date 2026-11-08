@@ -524,7 +524,7 @@ async function runMcpSession(binPath, args, rpcMessages, env = {}) {
   });
 }
 
-test("E2E Node MCP Server (@slashml/mcp and @slashml/memory bin): all 7 tools + --code-mode + --code-only", async () => {
+test("E2E Node MCP Server (@slashml/mcp and @slashml/memory bin): all standard tools + --code-mode + --code-only", async () => {
   const server = await createStatefulReferenceServer();
   const sampleRepo = fs.mkdtempSync(path.join(os.tmpdir(), "slashml-mcp-repo-"));
   fs.writeFileSync(
@@ -611,7 +611,7 @@ test("E2E Node MCP Server (@slashml/mcp and @slashml/memory bin): all 7 tools + 
       assert.equal(responses.length, 11);
       assert.equal(responses[0].result.serverInfo.name, "ml-memory");
       assert.deepEqual(responses[1].result, {});
-      assert.equal(responses[2].result.tools.length, 7);
+      assert.equal(responses[2].result.tools.length, 9);
 
       const addOut = JSON.parse(responses[3].result.content[0].text);
       assert.equal(addOut.results[0].id, "m_jwt");
@@ -1187,6 +1187,151 @@ test("Visibility Loop: MemoryClient.status() and CLI status / --status / --json"
     } catch {
       // ignore
     }
+    await mock.close();
+  }
+});
+
+test("Cloud Sandbox Lifecycle: sync-rules, watch-sandbox --once, MCP tools/call intervention drain, and CLI forget", async () => {
+  const storedMemories = [
+    {
+      id: "mem_sandbox_1",
+      user_id: "ellipsis-org",
+      memory: "Never call gateway.refunds.create directly in src/routes/*.mjs; always use BillingService.",
+    },
+  ];
+  const mock = await createMockServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.method === "GET" && req.url.startsWith("/v1/memories")) {
+      res.end(JSON.stringify({ results: storedMemories }));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/memory/intervene") {
+      if (req.body.hook_event_name === "PreToolUse") {
+        res.end(
+          JSON.stringify({
+            status: "ok",
+            action: "BLOCK",
+            should_intervene: true,
+            should_write: false,
+            intervention_severity: "BLOCK",
+            intervention_message:
+              "Stop: Do not call gateway.refunds.create directly in src/routes/refunds.mjs; use BillingService.",
+            violated_memory_ids: ["mem_sandbox_1"],
+          })
+        );
+        return;
+      }
+      res.end(
+        JSON.stringify({
+          status: "ok",
+          action: "WRITE_ONLY",
+          should_intervene: false,
+          should_write: true,
+          write_novelty_action: "NOVEL_WRITE",
+          extracted_write_span: req.body.text,
+        })
+      );
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/memories/search") {
+      res.end(JSON.stringify({ results: storedMemories }));
+      return;
+    }
+    if (req.method === "DELETE" && req.url.startsWith("/v1/memories/")) {
+      res.end(JSON.stringify({ deleted: true }));
+      return;
+    }
+    res.end(JSON.stringify({ status: "ok" }));
+  });
+
+  const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "slashml_sandbox_ws_"));
+  const tmpTranscripts = path.join(tmpWorkspace, "transcripts");
+  fs.mkdirSync(tmpTranscripts, { recursive: true });
+  const tmpOffsets = path.join(tmpWorkspace, "offsets.json");
+  const tmpIntervention = path.join(tmpWorkspace, "intervention.json");
+  const tmpTelemetry = path.join(tmpWorkspace, "telemetry.json");
+
+  const cliPath = path.join(__dirname, "..", "bin", "cli.js");
+  const mcpBinPath = path.resolve(__dirname, "../../mcp/bin/slashml-mcp.js");
+  const envVars = {
+    ...process.env,
+    SLASHML_USER_ID: "ellipsis-org",
+    SLASHML_SANDBOX_OFFSETS_PATH: tmpOffsets,
+    SLASHML_SANDBOX_INTERVENTION_PATH: tmpIntervention,
+    SLASHML_TELEMETRY_PATH: tmpTelemetry,
+  };
+
+  function execBin(bin, args) {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(
+        process.execPath,
+        [bin, "--base-url", mock.baseUrl, "--api-key", "sml_sandbox_key", ...args],
+        { env: envVars }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => (stdout += d.toString()));
+      proc.on("error", reject);
+      proc.on("close", () => resolve(stdout.trim()));
+    });
+  }
+
+  try {
+    // 1. sync-rules hydrates CLAUDE.md and AGENTS.md
+    const syncOut = JSON.parse(
+      await execBin(mcpBinPath, ["sync-rules", "--workspace", tmpWorkspace, "--json"])
+    );
+    assert.equal(syncOut.synced_count, 1);
+    assert.ok(fs.readFileSync(path.join(tmpWorkspace, "CLAUDE.md"), "utf8").includes("BillingService"));
+    assert.ok(fs.readFileSync(path.join(tmpWorkspace, "AGENTS.md"), "utf8").includes("BillingService"));
+
+    // 2. watch-sandbox --once tails transcript and writes intervention.json + updates CLAUDE.md
+    fs.writeFileSync(
+      path.join(tmpTranscripts, "sess_1.jsonl"),
+      [
+        JSON.stringify({ role: "user", content: "Always use BillingService for refunds." }),
+        JSON.stringify({
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              name: "Write",
+              input: {
+                file_path: "src/routes/refunds.mjs",
+                content: "gateway.refunds.create({ charge: id })",
+              },
+            },
+          ],
+        }),
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const watchOut = JSON.parse(
+      await execBin(cliPath, [
+        "watch-sandbox",
+        "--once",
+        "--workspace",
+        tmpWorkspace,
+        "--transcript-dir",
+        tmpTranscripts,
+        "--json",
+      ])
+    );
+    assert.equal(watchOut.processed_events, 2);
+    assert.equal(watchOut.memories_assimilated, 1);
+    assert.equal(watchOut.interventions_triggered, 1);
+    assert.ok(fs.existsSync(tmpIntervention));
+    assert.ok(
+      fs
+        .readFileSync(path.join(tmpWorkspace, "CLAUDE.md"), "utf8")
+        .includes("ACTIVE / ml MID-TURN COURSE CORRECTION")
+    );
+
+    // 3. CLI forget deletes memory
+    const forgetOut = JSON.parse(await execBin(mcpBinPath, ["forget", "mem_sandbox_1", "--json"]));
+    assert.equal(forgetOut.deleted, true);
+  } finally {
+    fs.rmSync(tmpWorkspace, { recursive: true, force: true });
     await mock.close();
   }
 });
