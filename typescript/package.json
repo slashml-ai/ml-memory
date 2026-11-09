@@ -1,0 +1,49 @@
+{
+  "name": "@slashml/memory",
+  "version": "1.0.11",
+  "description": "Official HTTP TypeScript & Node.js SDK for / ml (https://api.slashml.ai)",
+  "license": "Apache-2.0",
+  "homepage": "https://slashml.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/slashml-ai/ml-memory.git",
+    "directory": "typescript"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "memory": "./bin/cli.js",
+    "slashml-memory": "./bin/cli.js"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && node -e \"const fs = require('node:fs'); const code = 'import { createRequire } from \\\"node:module\\\";\\nconst require = createRequire(import.meta.url);\\nconst cjs = require(\\\"./index.js\\\");\\n\\nexport const {\\n  DEFAULT_BASE_URL,\\n  DEFAULT_MODEL,\\n  DEFAULT_TIMEOUT_MS,\\n  SlashMLAPIError,\\n  ProjectManager,\\n  MemoryClient,\\n  Memory,\\n  AsyncMemoryClient,\\n  AsyncMemory,\\n  SlashMLMemory,\\n  SlashMLClient,\\n  AsyncSlashMLMemory,\\n  AsyncSlashMLClient,\\n} = cjs;\\n\\nexport default cjs;\\n'; fs.writeFileSync('dist/index.mjs', code);\"",
+    "test": "node --test test/sdk.test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "slashml",
+    "memory",
+    "agent-memory",
+    "mem0",
+    "mcp",
+    "langgraph",
+    "semantic-memory"
+  ]
+}
