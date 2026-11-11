@@ -947,13 +947,12 @@ test("Ambient hooks: MemoryClient.intervene and CLI --hook", async () => {
       file_path: "src/payments/checkout.py",
     });
 
-    // Verify 1.0.6 hardening:
-    // (a) stop_hook_active=true short-circuits locally (<1ms) without hitting server
-    // (b) violated_memory_ids array from UserPromptSubmit is persisted and forwarded on Stop
-    // (c) transcript_path (snake_case JSONL) extracts last_assistant_message for Stop
+    // Verify 1.0.13 Stop circuit-breaker contract:
+    // (a) loop_count >= 3 (MAX_STOP_BLOCKS_PER_PROMPT) short-circuits locally (<1ms) without hitting server
+    // (b) stop_hook_active=true with loop_count < 3 forwards stop_blocked_memory_ids + stop_retry_count for chained distinct violations
     const mcpBinPath = path.resolve(__dirname, "../../mcp/bin/slashml-mcp.js");
     for (const hookBin of [cliPath, mcpBinPath]) {
-      const stopActiveOut = await new Promise((resolve, reject) => {
+      const ceilingOut = await new Promise((resolve, reject) => {
         const proc = spawn(
           process.execPath,
           [hookBin, "--hook", "--base-url", mock.baseUrl, "--api-key", "sml_live_hook"],
@@ -973,14 +972,46 @@ test("Ambient hooks: MemoryClient.intervene and CLI --hook", async () => {
           JSON.stringify({
             hook_event_name: "Stop",
             stop_hook_active: true,
+            loop_count: 3,
             session_id: "conv_123",
-            last_assistant_message: "Already handled the stop hook feedback.",
+            last_assistant_message: "Hit 3-retry safety ceiling.",
           })
         );
       });
-      assert.equal(stopActiveOut, "{}");
-      assert.equal(mock.requests.length, 2); // Server not called when stop_hook_active=true
+      assert.equal(ceilingOut, "{}");
+      assert.equal(mock.requests.length, 2); // Server not called when loop_count >= 3
     }
+
+    const chainedStopOut = await new Promise((resolve, reject) => {
+      const proc = spawn(
+        process.execPath,
+        [cliPath, "--hook", "--base-url", mock.baseUrl, "--api-key", "sml_live_hook"],
+        {
+          env: {
+            ...process.env,
+            SLASHML_TELEMETRY_PATH: tmpTelemetry,
+            SLASHML_HOOK_STATE_PATH: tmpHookState,
+          },
+        }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => (stdout += d.toString()));
+      proc.on("error", reject);
+      proc.on("close", () => resolve(stdout.trim()));
+      proc.stdin.end(
+        JSON.stringify({
+          hook_event_name: "Stop",
+          stop_hook_active: true,
+          session_id: "conv_123",
+          last_assistant_message: "Checking sequential distinct violation on Stop retry.",
+        })
+      );
+    });
+    assert.ok(chainedStopOut.includes("Blocked by active memory rule"));
+    assert.equal(mock.requests.length, 3);
+    assert.equal(mock.requests[2].body.stop_hook_active, true);
+    assert.ok(Array.isArray(mock.requests[2].body.turn_blocked_memory_ids));
+    assert.equal(mock.requests[2].body.stop_retry_count, 0);
 
     for (const f of [tmpTelemetry, tmpHookState]) {
       try {

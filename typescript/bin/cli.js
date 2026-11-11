@@ -10,7 +10,8 @@ const readline = require("readline");
 
 const DEFAULT_BASE_URL = "https://api.slashml.ai";
 const DEFAULT_CONSOLE_URL = "https://app.slashml.ai";
-const PACKAGE_VERSION = "1.0.11";
+const PACKAGE_VERSION = "1.0.13";
+const MAX_STOP_BLOCKS_PER_PROMPT = 3;
 
 function printHelp() {
   console.log(`@slashml/memory v${PACKAGE_VERSION} -- Official CLI & MCP Stdio Server for / ml (SlashML · https://slashml.ai)
@@ -43,7 +44,14 @@ Options:
   --once                         Run a single watch-sandbox transcript scan pass and exit
   --transcript-dir <dir>         Additional directory to scan for .jsonl agent transcripts
   status, --status               Show ambient memory ROI telemetry (tokens processed, % noise filtered, rules assimilated, amnesia intercepted)
-  --json                         Format status/sync output as JSON
+  migrate, --migrate             Migrate memories from Mem0, Zep, Supermemory, Honcho, Hindsight, Letta, or a JSON/JSONL/MD file
+  --from <provider>              Source provider for migrate: mem0 | zep | supermemory | honcho | hindsight | letta | file
+  --source-key <key>             Source provider API key (or MEM0_API_KEY / ZEP_API_KEY / SUPERMEMORY_API_KEY / HONCHO_API_KEY / LETTA_API_KEY)
+  --source-url <url>             Optional custom base URL for self-hosted source provider
+  --file <path>                  Import memories from a local JSON, JSONL, CSV, or Markdown export file
+  import-local, --import-local   Import local coding-agent memories (~/.claude/projects/*/memory/*.md, CLAUDE.md, .cursorrules, .windsurfrules, .cursor/rules)
+  --dry-run                      Preview discovered memories during migrate or import-local without writing to / ml
+  --json                         Format status/sync/migrate output as JSON
   --signup <work-email>          Request a 6-digit OTP to provision a / ml free API key (requires work/custom domain @company.com; for @gmail.com / @hotmail.com sign in with Google/GitHub at https://app.slashml.ai)
   --verify <work-email> <code>   Verify 6-digit code and print the new SLASHML_API_KEY to stdout`);
 }
@@ -195,6 +203,13 @@ function parseCliArgs(argv) {
   let intervalMs = 1500;
   let transcriptDir = process.env.SLASHML_TRANSCRIPT_DIR || null;
   let forgetId = null;
+  let isMigrate = false;
+  let migrateFrom = null;
+  let sourceKey = null;
+  let sourceUrl = null;
+  let importFile = null;
+  let isImportLocal = false;
+  let isDryRun = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -214,6 +229,22 @@ function parseCliArgs(argv) {
       isSyncRules = true;
     } else if (arg === "--watch-sandbox" || arg === "watch-sandbox") {
       isWatchSandbox = true;
+    } else if (arg === "migrate" || arg === "--migrate") {
+      isMigrate = true;
+    } else if (arg === "--from" && i + 1 < argv.length) {
+      migrateFrom = argv[++i].trim().toLowerCase();
+      isMigrate = true;
+    } else if ((arg === "--source-key" || arg === "--from-key") && i + 1 < argv.length) {
+      sourceKey = argv[++i].trim();
+    } else if ((arg === "--source-url" || arg === "--from-url") && i + 1 < argv.length) {
+      sourceUrl = argv[++i].trim().replace(/\/+$/, "");
+    } else if (arg === "--file" && i + 1 < argv.length) {
+      importFile = argv[++i];
+      isMigrate = true;
+    } else if (arg === "import-local" || arg === "--import-local") {
+      isImportLocal = true;
+    } else if (arg === "--dry-run") {
+      isDryRun = true;
     } else if ((arg === "--forget" || arg === "forget") && i + 1 < argv.length) {
       forgetId = argv[++i];
     } else if (arg === "--daemon") {
@@ -291,6 +322,13 @@ function parseCliArgs(argv) {
     intervalMs,
     transcriptDir,
     forgetId,
+    isMigrate,
+    migrateFrom,
+    sourceKey,
+    sourceUrl,
+    importFile,
+    isImportLocal,
+    isDryRun,
   };
 }
 
@@ -1171,6 +1209,22 @@ async function runStatusCommand(opts) {
     noiseFilteredPct = Number((Math.max(tokRatio, evRatio) * 100.0).toFixed(1));
   }
 
+  const objectionsRepeatSuppressed = Number(
+    (serverStatus && serverStatus.objections_repeat_suppressed) || 0
+  );
+  const objectionsChainedBlocks = Number(
+    (serverStatus && serverStatus.objections_chained_distinct_blocks) || 0
+  );
+  const objectionsResolvedOnRetry = Number(
+    (serverStatus && serverStatus.objections_resolved_on_retry) || 0
+  );
+  const memoriesAutoDowngraded = Number(
+    (serverStatus && serverStatus.memories_auto_downgraded) || 0
+  );
+  const flaggedNoisyMemories = Array.isArray(serverStatus && serverStatus.flagged_noisy_memories)
+    ? serverStatus.flagged_noisy_memories
+    : [];
+
   const summaryLine =
     (serverStatus && serverStatus.summary_line) ||
     `${memoriesAssimilated} rules learned passively • ${amnesiaIntercepted} amnesia episodes intercepted • ${Math.round(noiseFilteredPct)}% stream noise filtered`;
@@ -1180,6 +1234,11 @@ async function runStatusCommand(opts) {
     memories_assimilated: memoriesAssimilated,
     memories_superseded: memoriesSuperseded,
     amnesia_episodes_intercepted: amnesiaIntercepted,
+    objections_chained_distinct_blocks: objectionsChainedBlocks,
+    objections_repeat_suppressed: objectionsRepeatSuppressed,
+    objections_resolved_on_retry: objectionsResolvedOnRetry,
+    memories_auto_downgraded: memoriesAutoDowngraded,
+    flagged_noisy_memories: flaggedNoisyMemories,
     events_processed: eventsProcessed,
     events_filtered_noise: eventsFiltered,
     summary_line: summaryLine,
@@ -1200,6 +1259,18 @@ async function runStatusCommand(opts) {
     `  # New Memories Assimilated      : ${memoriesAssimilated}${memoriesSuperseded > 0 ? ` (${memoriesSuperseded} superseded)` : ""}`
   );
   console.log(`  # Amnesia Episodes Intercepted  : ${amnesiaIntercepted}`);
+  if (
+    objectionsRepeatSuppressed > 0 ||
+    objectionsResolvedOnRetry > 0 ||
+    memoriesAutoDowngraded > 0
+  ) {
+    console.log(
+      `  # Objections Resolved on Retry  : ${objectionsResolvedOnRetry}${objectionsChainedBlocks > 0 ? ` (${objectionsChainedBlocks} chained distinct)` : ""}`
+    );
+    console.log(
+      `  # Repeat Objections Suppressed  : ${objectionsRepeatSuppressed}${memoriesAutoDowngraded > 0 ? ` (${memoriesAutoDowngraded} noisy memories auto-downgraded)` : ""}`
+    );
+  }
 }
 
 function extractLastPlannerResponseFromTranscript(transcriptPath) {
@@ -1400,7 +1471,9 @@ async function runAmbientHookMode(opts) {
       payload.terminationReason !== undefined ||
       payload.workspacePaths !== undefined ||
       payload.artifactDirectoryPath !== undefined ||
-      payload.conversationId !== undefined
+      payload.conversationId !== undefined ||
+      (payload.conversation_id !== undefined &&
+        (cliEvent === "Stop" || payload.transcript_path !== undefined))
   );
 
   let rawEventName = String(
@@ -1458,8 +1531,8 @@ async function runAmbientHookMode(opts) {
     }
   }
 
-  // On Claude Code / Cursor Stop, never re-block if stop_hook_active is already true
-  if (!isGeminiHook && hookEvent === "Stop" && (payload.stop_hook_active || payload.loop_count > 0)) {
+  // Enforce hard 3-retry safety ceiling locally if harness passes an explicit loop_count >= 3
+  if (hookEvent === "Stop" && Number(payload.loop_count || 0) >= MAX_STOP_BLOCKS_PER_PROMPT) {
     writeDefaultHookOutput(isGeminiHook, rawEventName, isCursorHook);
     return;
   }
@@ -1655,12 +1728,51 @@ async function runAmbientHookMode(opts) {
     .trim()
     .slice(0, 1024);
 
+  const whisperKey = sessionKey || scopeStateKey;
+  const isMidTurnContinuation =
+    rawEventName === "PreInvocation" &&
+    (Number(payload.invocationNum || 1) > 1 || Number(payload.executionNum || 1) > 1);
+  if (!dedupState.stop_turn_by_session || typeof dedupState.stop_turn_by_session !== "object") {
+    dedupState.stop_turn_by_session = {};
+  }
+  if (hookEvent === "UserPromptSubmit" && !isMidTurnContinuation && whisperKey) {
+    const existingStopTurn = dedupState.stop_turn_by_session[whisperKey];
+    if (
+      existingStopTurn &&
+      ((Array.isArray(existingStopTurn.blocked_ids) && existingStopTurn.blocked_ids.length > 0) ||
+        Number(existingStopTurn.retry_count || 0) > 0)
+    ) {
+      dedupState.stop_turn_by_session[whisperKey] = { blocked_ids: [], retry_count: 0 };
+      try {
+        fs.mkdirSync(path.dirname(dedupPath), { recursive: true });
+        fs.writeFileSync(dedupPath, JSON.stringify(dedupState), "utf8");
+      } catch {
+        // ignore state persistence errors
+      }
+    }
+  }
+
   if (
     !deltaText ||
     deltaText.length < 4 ||
     /^(ok|okay|thanks|thank you|yes|no|sure|cool|lgtm)[.!]*$/i.test(deltaText)
   ) {
     recordLocalHookDrop(rawEventTokens);
+    writeDefaultHookOutput(isGeminiHook, rawEventName, isCursorHook);
+    return;
+  }
+
+  const activeStopTurn =
+    whisperKey &&
+    dedupState.stop_turn_by_session[whisperKey] &&
+    typeof dedupState.stop_turn_by_session[whisperKey] === "object"
+      ? dedupState.stop_turn_by_session[whisperKey]
+      : { blocked_ids: [], retry_count: 0 };
+  const turnBlockedIds = Array.isArray(activeStopTurn.blocked_ids)
+    ? activeStopTurn.blocked_ids.map(String).filter(Boolean)
+    : [];
+  const turnStopRetries = Number(activeStopTurn.retry_count || 0);
+  if (hookEvent === "Stop" && turnStopRetries >= MAX_STOP_BLOCKS_PER_PROMPT) {
     writeDefaultHookOutput(isGeminiHook, rawEventName, isCursorHook);
     return;
   }
@@ -1706,9 +1818,6 @@ async function runAmbientHookMode(opts) {
   if (!dedupState.blocked_actions_by_session || typeof dedupState.blocked_actions_by_session !== "object") {
     dedupState.blocked_actions_by_session = {};
   }
-  const whisperKey = sessionKey || scopeStateKey;
-  const isMidTurnContinuation =
-    rawEventName === "PreInvocation" && Number(payload.invocationNum || 1) > 1;
   const targetSig = toolIn
     ? String(
         toolIn.file_path ||
@@ -1801,8 +1910,11 @@ async function runAmbientHookMode(opts) {
         ? {
             last_assistant_message: deltaText,
             stop_hook_active: Boolean(payload.stop_hook_active),
+            turn_blocked_memory_ids: turnBlockedIds,
+            stop_retry_count: turnStopRetries,
           }
         : {}),
+      ...(isMidTurnContinuation ? { is_mid_turn_continuation: true } : {}),
       tool_name: toolName,
       tool_input: effectiveToolIn,
       tool_response: payload.tool_response || payload.toolResponse || null,
@@ -1812,11 +1924,46 @@ async function runAmbientHookMode(opts) {
       model: process.env.SLASHML_MODEL || undefined,
       user_id: opts.userId,
       ...(projectId ? { project_id: projectId } : {}),
-      ...(sessionKey ? { session_id: sessionKey } : {}),
+      session_id: whisperKey,
       client_raw_tokens_delta: (telem.pending_raw_tokens_delta || 0) + strippedTokens,
       client_dropped_tokens_delta: (telem.pending_dropped_tokens_delta || 0) + strippedTokens,
       client_dropped_events_delta: telem.pending_dropped_events_delta || 0,
     });
+    // Client-side per-memory Stop circuit breaker (defense-in-depth across server restarts/versions):
+    // at most 1 Stop block per memory_id per user prompt, and at most MAX_STOP_BLOCKS_PER_PROMPT total.
+    if (
+      hookEvent === "Stop" &&
+      resp &&
+      resp.should_intervene &&
+      (resp.intervention_severity === "BLOCK" || resp.action === "BLOCK")
+    ) {
+      const respTriggered = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(resp.violated_memory_ids) ? resp.violated_memory_ids : []),
+            ...(resp.violated_memory_id ? [resp.violated_memory_id] : []),
+            ...(resp.triggered_memory_id ? [resp.triggered_memory_id] : []),
+          ]
+            .map(String)
+            .filter(Boolean)
+        )
+      );
+      const novelStopIds = respTriggered.filter((id) => !turnBlockedIds.includes(id));
+      if (
+        turnStopRetries >= MAX_STOP_BLOCKS_PER_PROMPT ||
+        (respTriggered.length > 0 && novelStopIds.length === 0)
+      ) {
+        resp.should_intervene = false;
+        resp.intervention_severity = "NONE";
+        resp.intervention_message = null;
+        resp.hook_output = {};
+      } else if (whisperKey) {
+        dedupState.stop_turn_by_session[whisperKey] = {
+          blocked_ids: Array.from(new Set([...turnBlockedIds, ...novelStopIds])).slice(-16),
+          retry_count: turnStopRetries + 1,
+        };
+      }
+    }
     telem.pending_raw_tokens_delta = 0;
     telem.pending_dropped_tokens_delta = 0;
     telem.pending_dropped_events_delta = 0;
@@ -1879,10 +2026,18 @@ async function runAmbientHookMode(opts) {
     } else {
       telem.noise_tokens_filtered = (telem.noise_tokens_filtered || 0) + rawEventTokens;
       telem.events_filtered_noise = (telem.events_filtered_noise || 0) + 1;
-      dedupState.hashes = [
-        ...(Array.isArray(dedupState.hashes) ? dedupState.hashes.slice(-63) : []),
-        deltaHash,
-      ];
+      const wasRepeatSuppressed = Boolean(
+        resp &&
+          ((Array.isArray(resp.repeat_suppressed_memory_ids) &&
+            resp.repeat_suppressed_memory_ids.length > 0) ||
+            resp.objection_outcome === "SAFETY_CEILING_SUPPRESSED")
+      );
+      if (!wasRepeatSuppressed && hookEvent !== "Stop" && hookEvent !== "PreToolUse") {
+        dedupState.hashes = [
+          ...(Array.isArray(dedupState.hashes) ? dedupState.hashes.slice(-63) : []),
+          deltaHash,
+        ];
+      }
     }
     try {
       fs.mkdirSync(path.dirname(dedupPath), { recursive: true });
@@ -2635,6 +2790,695 @@ function drainPendingSandboxIntervention() {
     // ignore
   }
   return null;
+}
+
+function makeMigrationDocId(prefix, text, userId = "default") {
+  const crypto = require("crypto");
+  const digest = crypto
+    .createHash("sha1")
+    .update(`${prefix}:${userId}:${String(text || "").trim().toLowerCase()}`)
+    .digest("hex")
+    .slice(0, 12);
+  return `mig_${prefix}_${digest}`;
+}
+
+function stripCommentMarkerBlock(input, startSuffix, endSuffix) {
+  let out = String(input || "");
+  while (true) {
+    const mid = out.indexOf(startSuffix);
+    if (mid === -1) break;
+    const blockStart = out.lastIndexOf("<!--", mid);
+    if (blockStart === -1) break;
+    const endMid = out.indexOf(endSuffix, mid + startSuffix.length);
+    if (endMid === -1) break;
+    const blockEnd = out.indexOf("-->", endMid + endSuffix.length);
+    if (blockEnd === -1) break;
+    out = out.slice(0, blockStart) + out.slice(blockEnd + 3);
+  }
+  return out;
+}
+
+function stripSlashmlInjectedBlocks(rawMarkdown) {
+  const withoutRules = stripCommentMarkerBlock(
+    rawMarkdown,
+    "-MEMORY-RULE:START",
+    "-MEMORY-RULE:END"
+  );
+  const withoutAmbient = stripCommentMarkerBlock(
+    withoutRules,
+    "SLASHML-AMBIENT-MEMORY:START",
+    "SLASHML-AMBIENT-MEMORY:END"
+  );
+  return withoutAmbient
+    .replace(/^---[\r\n]+[\s\S]*?[\r\n]+---[\r\n]*/m, "")
+    .trim();
+}
+
+function extractEntriesFromMarkdown(rawMarkdown, defaultUserId, baseMetadata = {}) {
+  const cleaned = stripSlashmlInjectedBlocks(rawMarkdown);
+  if (!cleaned) return [];
+  const entries = [];
+  const lines = cleaned.split(/\r?\n/);
+  let currentHeading = "";
+  let paragraphBuf = [];
+
+  function flushParagraph() {
+    if (paragraphBuf.length === 0) return;
+    const text = paragraphBuf.join(" ").replace(/\s+/g, " ").trim();
+    paragraphBuf = [];
+    if (text.length >= 12) {
+      const fullText = currentHeading ? `[${currentHeading}] ${text}` : text;
+      entries.push({
+        text: fullText,
+        user_id: defaultUserId,
+        metadata: { ...baseMetadata, ...(currentHeading ? { section: currentHeading } : {}) },
+      });
+    }
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushParagraph();
+      continue;
+    }
+    const headingMatch = line.match(/^#{1,4}\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      currentHeading = headingMatch[1].trim();
+      continue;
+    }
+    const bulletMatch = line.match(/^(?:[-*+]|\d+\.)\s+(.+)$/);
+    if (bulletMatch) {
+      flushParagraph();
+      const itemText = bulletMatch[1].replace(/\s+/g, " ").trim();
+      if (itemText.length >= 8) {
+        const fullText = currentHeading ? `[${currentHeading}] ${itemText}` : itemText;
+        entries.push({
+          text: fullText,
+          user_id: defaultUserId,
+          metadata: { ...baseMetadata, ...(currentHeading ? { section: currentHeading } : {}) },
+        });
+      }
+      continue;
+    }
+    paragraphBuf.push(line);
+  }
+  flushParagraph();
+  return entries;
+}
+
+function normalizeImportedRecord(item, provider, defaultUserId, extraMeta = {}) {
+  if (!item) return null;
+  if (typeof item === "string") {
+    const t = item.trim();
+    if (!t) return null;
+    return {
+      id: makeMigrationDocId(provider, t, defaultUserId),
+      text: t,
+      user_id: defaultUserId,
+      metadata: { source_provider: provider, ...extraMeta },
+    };
+  }
+  if (typeof item !== "object") return null;
+  const text = String(
+    item.memory ||
+      item.text ||
+      item.fact ||
+      item.content ||
+      item.summary ||
+      item.value ||
+      (Array.isArray(item.messages)
+        ? item.messages
+            .map((m) => (typeof m === "string" ? m : `${m.role || "user"}: ${m.content || m.text || ""}`))
+            .join("\n")
+        : "") ||
+      ""
+  ).trim();
+  if (!text) return null;
+  const resolvedUser = String(
+    item.user_id ||
+      item.userId ||
+      item.agent_id ||
+      item.agentId ||
+      (item.metadata && (item.metadata.user_id || item.metadata.agent_id)) ||
+      defaultUserId ||
+      "default"
+  ).trim();
+  const baseMeta = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const categories = Array.isArray(item.categories) ? item.categories : undefined;
+  return {
+    id: String(item.id || item.memory_id || item.uuid || makeMigrationDocId(provider, text, resolvedUser)),
+    text,
+    user_id: resolvedUser,
+    metadata: {
+      ...baseMeta,
+      ...extraMeta,
+      source_provider: provider,
+      user_id: resolvedUser,
+      ...(item.agent_id ? { agent_id: item.agent_id } : {}),
+      ...(item.app_id ? { app_id: item.app_id } : {}),
+      ...(item.run_id || item.session_id ? { run_id: item.run_id || item.session_id } : {}),
+      ...(categories ? { categories } : {}),
+      ...(item.created_at ? { source_created_at: item.created_at } : {}),
+    },
+  };
+}
+
+function parseMemoriesFromFileContent(rawContent, filePath, defaultUserId) {
+  const ext = path.extname(filePath || "").toLowerCase();
+  const trimmed = String(rawContent || "").trim();
+  if (!trimmed) return [];
+
+  if (ext === ".md" || ext === ".mdc" || ext === ".txt" || filePath.endsWith("rules")) {
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+      return extractEntriesFromMarkdown(trimmed, defaultUserId, {
+        source_file: path.basename(filePath),
+      }).map((e) => normalizeImportedRecord(e, "file", defaultUserId, e.metadata));
+    }
+  }
+
+  // Try JSON
+  try {
+    const parsedJson = JSON.parse(trimmed);
+    const list = Array.isArray(parsedJson)
+      ? parsedJson
+      : Array.isArray(parsedJson.results)
+        ? parsedJson.results
+        : Array.isArray(parsedJson.memories)
+          ? parsedJson.memories
+          : Array.isArray(parsedJson.documents)
+            ? parsedJson.documents
+            : Array.isArray(parsedJson.items)
+              ? parsedJson.items
+              : Array.isArray(parsedJson.facts)
+                ? parsedJson.facts
+                : parsedJson.vault && Array.isArray(parsedJson.vault.documents)
+                  ? parsedJson.vault.documents
+                  : [parsedJson];
+    return list
+      .map((item) => normalizeImportedRecord(item, "file", defaultUserId, { source_file: path.basename(filePath) }))
+      .filter(Boolean);
+  } catch {
+    // Try JSONL
+    const lines = trimmed.split(/\r?\n/);
+    const jsonlItems = [];
+    let isJsonl = false;
+    for (const l of lines) {
+      const s = l.trim();
+      if (!s) continue;
+      if (s.startsWith("{")) {
+        try {
+          const obj = JSON.parse(s);
+          isJsonl = true;
+          const norm = normalizeImportedRecord(obj, "file", defaultUserId, {
+            source_file: path.basename(filePath),
+          });
+          if (norm) jsonlItems.push(norm);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (isJsonl && jsonlItems.length > 0) {
+      return jsonlItems;
+    }
+  }
+
+  return extractEntriesFromMarkdown(trimmed, defaultUserId, {
+    source_file: path.basename(filePath),
+  })
+    .map((e) => normalizeImportedRecord(e, "file", defaultUserId, e.metadata))
+    .filter(Boolean);
+}
+
+async function fetchProviderMemories(provider, sourceKey, sourceUrl, defaultUserId) {
+  const normProvider = String(provider || "").trim().toLowerCase();
+  const collected = [];
+
+  if (normProvider === "mem0") {
+    const base = (sourceUrl || "https://api.mem0.ai").replace(/\/+$/, "");
+    const headers = {
+      Authorization: sourceKey.startsWith("Token ") || sourceKey.startsWith("Bearer ") ? sourceKey : `Token ${sourceKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    for (let page = 1; page <= 50; page++) {
+      const qs = new URLSearchParams({ page: String(page), page_size: "100" });
+      if (defaultUserId && defaultUserId !== "default") {
+        qs.set("user_id", defaultUserId);
+      }
+      const res = await fetch(`${base}/v1/memories/?${qs.toString()}`, { headers });
+      if (!res.ok) {
+        if (page === 1) {
+          const v2Res = await fetch(`${base}/v2/memories/`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              filters: defaultUserId && defaultUserId !== "default" ? { user_id: defaultUserId } : {},
+              page: 1,
+              page_size: 200,
+            }),
+          });
+          if (!v2Res.ok) {
+            const errTxt = await res.text().catch(() => "");
+            throw new Error(`Mem0 API returned HTTP ${res.status}: ${errTxt.slice(0, 200)}`);
+          }
+          const v2Data = await v2Res.json();
+          const v2Items = Array.isArray(v2Data) ? v2Data : v2Data.results || v2Data.memories || [];
+          for (const it of v2Items) {
+            const n = normalizeImportedRecord(it, "mem0", defaultUserId);
+            if (n) collected.push(n);
+          }
+        }
+        break;
+      }
+      const data = await res.json();
+      const items = Array.isArray(data) ? data : data.results || data.memories || [];
+      if (items.length === 0) break;
+      for (const it of items) {
+        const n = normalizeImportedRecord(it, "mem0", defaultUserId);
+        if (n) collected.push(n);
+      }
+      if (items.length < 100 || (!Array.isArray(data) && !data.next)) break;
+    }
+    return collected;
+  }
+
+  if (normProvider === "zep") {
+    const base = (sourceUrl || "https://api.getzep.com").replace(/\/+$/, "");
+    const authHeader = sourceKey.startsWith("z_") ? `Api-Key ${sourceKey}` : `Bearer ${sourceKey}`;
+    const headers = { Authorization: authHeader, Accept: "application/json" };
+
+    if (defaultUserId && defaultUserId !== "default") {
+      const uRes = await fetch(`${base}/api/v2/users/${encodeURIComponent(defaultUserId)}/facts`, { headers });
+      if (uRes.ok) {
+        const uData = await uRes.json();
+        const facts = Array.isArray(uData) ? uData : uData.facts || uData.results || [];
+        for (const f of facts) {
+          const n = normalizeImportedRecord(f, "zep", defaultUserId);
+          if (n) collected.push(n);
+        }
+      }
+    }
+
+    const sRes = await fetch(`${base}/api/v2/sessions-ordered?pageSize=100&pageNumber=1`, { headers });
+    if (!sRes.ok && collected.length === 0) {
+      const errTxt = await sRes.text().catch(() => "");
+      throw new Error(`Zep API returned HTTP ${sRes.status}: ${errTxt.slice(0, 200)}`);
+    }
+    if (sRes.ok) {
+      const sData = await sRes.json();
+      const sessions = Array.isArray(sData) ? sData : sData.sessions || sData.results || [];
+      for (const sess of sessions.slice(0, 50)) {
+        const sid = sess.session_id || sess.sessionId || sess.id;
+        if (!sid) continue;
+        const mRes = await fetch(`${base}/api/v2/sessions/${encodeURIComponent(sid)}/memory`, { headers });
+        if (!mRes.ok) continue;
+        const mData = await mRes.json();
+        const facts = Array.isArray(mData.facts)
+          ? mData.facts
+          : Array.isArray(mData.relevant_facts)
+            ? mData.relevant_facts
+            : [];
+        for (const f of facts) {
+          const n = normalizeImportedRecord(f, "zep", sess.user_id || defaultUserId, { session_id: sid });
+          if (n) collected.push(n);
+        }
+        if (mData.summary && mData.summary.content) {
+          const n = normalizeImportedRecord(
+            { text: mData.summary.content, user_id: sess.user_id || defaultUserId },
+            "zep",
+            sess.user_id || defaultUserId,
+            { session_id: sid, kind: "session_summary" }
+          );
+          if (n) collected.push(n);
+        }
+      }
+    }
+    return collected;
+  }
+
+  if (normProvider === "supermemory") {
+    const base = (sourceUrl || "https://api.supermemory.ai").replace(/\/+$/, "");
+    const headers = {
+      Authorization: sourceKey.startsWith("Bearer ") ? sourceKey : `Bearer ${sourceKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    let res = await fetch(`${base}/v3/documents/list`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ page: 1, limit: 200 }),
+    });
+    if (!res.ok) {
+      res = await fetch(`${base}/v3/memories`, { headers });
+    }
+    if (!res.ok) {
+      const errTxt = await res.text().catch(() => "");
+      throw new Error(`Supermemory API returned HTTP ${res.status}: ${errTxt.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const items = Array.isArray(data) ? data : data.memories || data.documents || data.results || [];
+    for (const it of items) {
+      const n = normalizeImportedRecord(it, "supermemory", defaultUserId);
+      if (n) collected.push(n);
+    }
+    return collected;
+  }
+
+  if (normProvider === "honcho") {
+    const base = (sourceUrl || "https://api.honcho.dev").replace(/\/+$/, "");
+    const headers = {
+      Authorization: sourceKey.startsWith("Bearer ") ? sourceKey : `Bearer ${sourceKey}`,
+      Accept: "application/json",
+    };
+    const appsRes = await fetch(`${base}/v1/apps`, { headers });
+    if (!appsRes.ok) {
+      const errTxt = await appsRes.text().catch(() => "");
+      throw new Error(`Honcho API returned HTTP ${appsRes.status}: ${errTxt.slice(0, 200)}`);
+    }
+    const appsData = await appsRes.json();
+    const apps = Array.isArray(appsData) ? appsData : appsData.apps || appsData.items || [];
+    for (const app of apps.slice(0, 10)) {
+      const appId = app.id || app.app_id;
+      if (!appId) continue;
+      const uRes = await fetch(`${base}/v1/apps/${encodeURIComponent(appId)}/users?size=100`, { headers });
+      if (!uRes.ok) continue;
+      const uData = await uRes.json();
+      const users = Array.isArray(uData) ? uData : uData.items || uData.users || [];
+      for (const u of users.slice(0, 50)) {
+        const uid = u.id || u.user_id;
+        if (!uid) continue;
+        const mmRes = await fetch(
+          `${base}/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(uid)}/metamessages?size=100`,
+          { headers }
+        );
+        if (!mmRes.ok) continue;
+        const mmData = await mmRes.json();
+        const mms = Array.isArray(mmData) ? mmData : mmData.items || mmData.metamessages || [];
+        for (const mm of mms) {
+          const n = normalizeImportedRecord(mm, "honcho", u.name || uid, { app_id: appId });
+          if (n) collected.push(n);
+        }
+      }
+    }
+    return collected;
+  }
+
+  if (normProvider === "hindsight") {
+    const base = (sourceUrl || "https://api.hindsight.vectorize.io").replace(/\/+$/, "");
+    const headers = {
+      Authorization: sourceKey.startsWith("Bearer ") ? sourceKey : `Bearer ${sourceKey}`,
+      Accept: "application/json",
+    };
+    const res = await fetch(`${base}/v1/memories`, { headers });
+    if (!res.ok) {
+      const errTxt = await res.text().catch(() => "");
+      throw new Error(`Hindsight API returned HTTP ${res.status}: ${errTxt.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    const items = Array.isArray(data) ? data : data.memories || data.results || data.items || [];
+    for (const it of items) {
+      const n = normalizeImportedRecord(it, "hindsight", defaultUserId);
+      if (n) collected.push(n);
+    }
+    return collected;
+  }
+
+  if (normProvider === "letta" || normProvider === "memgpt") {
+    const base = (sourceUrl || "https://api.letta.com").replace(/\/+$/, "");
+    const headers = {
+      Authorization: sourceKey.startsWith("Bearer ") ? sourceKey : `Bearer ${sourceKey}`,
+      Accept: "application/json",
+    };
+    const aRes = await fetch(`${base}/v1/agents/`, { headers });
+    if (!aRes.ok) {
+      const errTxt = await aRes.text().catch(() => "");
+      throw new Error(`Letta API returned HTTP ${aRes.status}: ${errTxt.slice(0, 200)}`);
+    }
+    const agents = await aRes.json();
+    const agentList = Array.isArray(agents) ? agents : agents.agents || [];
+    for (const ag of agentList.slice(0, 30)) {
+      const aid = ag.id;
+      if (!aid) continue;
+      const pRes = await fetch(`${base}/v1/agents/${encodeURIComponent(aid)}/archival-memory?limit=100`, {
+        headers,
+      });
+      if (!pRes.ok) continue;
+      const passages = await pRes.json();
+      const pList = Array.isArray(passages) ? passages : passages.passages || passages.results || [];
+      for (const p of pList) {
+        const n = normalizeImportedRecord(p, "letta", ag.name || defaultUserId, { agent_id: aid });
+        if (n) collected.push(n);
+      }
+    }
+    return collected;
+  }
+
+  throw new Error(
+    `Unsupported provider "${provider}". Supported providers: mem0, zep, supermemory, honcho, hindsight, letta, file.`
+  );
+}
+
+async function batchIngestMigratedRecords(opts, records) {
+  const seenIds = new Set();
+  const deduped = [];
+  for (const r of records) {
+    if (!r || !r.text) continue;
+    const id = r.id || makeMigrationDocId("import", r.text, r.user_id || opts.userId);
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    deduped.push({ ...r, id });
+  }
+
+  if (opts.isDryRun || deduped.length === 0) {
+    return { total_discovered: deduped.length, ingested_count: 0, dry_run: Boolean(opts.isDryRun), sample: deduped.slice(0, 5) };
+  }
+
+  if (!opts.apiKey) {
+    throw new Error(
+      "Missing SLASHML_API_KEY. Set SLASHML_API_KEY or pass --api-key <sml_live_...> (or sign in at https://app.slashml.ai)."
+    );
+  }
+
+  let ingestedCount = 0;
+  const batchSize = 50;
+  for (let i = 0; i < deduped.length; i += batchSize) {
+    const chunk = deduped.slice(i, i + batchSize);
+    const documents = chunk.map((r) => ({
+      id: r.id,
+      text: r.text,
+      metadata: {
+        ...(r.metadata || {}),
+        user_id: r.user_id || opts.userId || "default",
+      },
+    }));
+    await apiRequest(opts, "POST", "/v1/memory/ingest", { documents });
+    ingestedCount += chunk.length;
+  }
+
+  return {
+    total_discovered: deduped.length,
+    ingested_count: ingestedCount,
+    dry_run: false,
+    sample: deduped.slice(0, 5),
+  };
+}
+
+async function runMigrateCommand(opts) {
+  const provider = (opts.migrateFrom || (opts.importFile ? "file" : "mem0")).toLowerCase();
+  let records = [];
+
+  if (opts.importFile || provider === "file") {
+    if (!opts.importFile) {
+      throw new Error("Missing --file <path> for file migration. Example: npx -y @slashml/memory migrate --file ./memories.json");
+    }
+    const resolvedPath = path.resolve(opts.importFile);
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(`File not found: ${resolvedPath}`);
+    }
+    const content = fs.readFileSync(resolvedPath, "utf8");
+    records = parseMemoriesFromFileContent(content, resolvedPath, opts.userId || "default");
+  } else {
+    const envKeyMap = {
+      mem0: process.env.MEM0_API_KEY,
+      zep: process.env.ZEP_API_KEY,
+      supermemory: process.env.SUPERMEMORY_API_KEY,
+      honcho: process.env.HONCHO_API_KEY,
+      hindsight: process.env.HINDSIGHT_API_KEY,
+      letta: process.env.LETTA_API_KEY,
+      memgpt: process.env.LETTA_API_KEY,
+    };
+    const resolvedSourceKey = opts.sourceKey || envKeyMap[provider];
+    if (!resolvedSourceKey) {
+      throw new Error(
+        `Missing source API key for "${provider}". Pass --source-key <key> or set ${provider.toUpperCase()}_API_KEY.`
+      );
+    }
+    records = await fetchProviderMemories(provider, resolvedSourceKey, opts.sourceUrl, opts.userId || "default");
+  }
+
+  const res = await batchIngestMigratedRecords(opts, records);
+  const payload = {
+    status: opts.isDryRun ? "dry_run" : "migrated",
+    source: opts.importFile ? `file:${opts.importFile}` : provider,
+    user_id: opts.userId || "default",
+    ...res,
+  };
+
+  if (opts.jsonOutput) {
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+  } else {
+    console.log(
+      `[/ ml] ${opts.isDryRun ? "[DRY RUN] Discovered" : "Migrated"} ${res.ingested_count || res.total_discovered} memories from ${payload.source} into / ml (user_id=${payload.user_id}).`
+    );
+  }
+}
+
+function discoverLocalAgentMemoryFiles(workspaceRoot) {
+  const home = os.homedir();
+  const cwd = workspaceRoot ? path.resolve(workspaceRoot) : process.cwd();
+  const candidates = [];
+
+  function addIfFile(p, kind) {
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+        candidates.push({ path: p, kind });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 1. Claude Code global & per-project auto-memory (~/.claude/CLAUDE.md, ~/.claude/projects/*/memory/*.md)
+  addIfFile(path.join(home, ".claude", "CLAUDE.md"), "claude_global");
+  const claudeProjectsDir = path.join(home, ".claude", "projects");
+  if (fs.existsSync(claudeProjectsDir)) {
+    try {
+      for (const projEntry of fs.readdirSync(claudeProjectsDir, { withFileTypes: true })) {
+        if (!projEntry.isDirectory()) continue;
+        const projMemoryDir = path.join(claudeProjectsDir, projEntry.name, "memory");
+        if (fs.existsSync(projMemoryDir)) {
+          for (const memFile of fs.readdirSync(projMemoryDir, { withFileTypes: true })) {
+            if (memFile.isFile() && memFile.name.endsWith(".md") && memFile.name.toLowerCase() !== "memory.md") {
+              addIfFile(path.join(projMemoryDir, memFile.name), `claude_project:${projEntry.name}`);
+            } else if (memFile.isFile() && memFile.name.toLowerCase() === "memory.md") {
+              addIfFile(path.join(projMemoryDir, memFile.name), `claude_project_index:${projEntry.name}`);
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2. Workspace-level agent rule & memory files
+  for (const rel of [
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".cursorrules",
+    ".windsurfrules",
+    ".clinerules",
+    ".github/copilot-instructions.md",
+  ]) {
+    addIfFile(path.join(cwd, rel), "workspace_rules");
+  }
+
+  // 3. Cursor .cursor/rules/*.{mdc,md}
+  const cursorRulesDir = path.join(cwd, ".cursor", "rules");
+  if (fs.existsSync(cursorRulesDir)) {
+    try {
+      for (const e of fs.readdirSync(cursorRulesDir, { withFileTypes: true })) {
+        if (e.isFile() && (e.name.endsWith(".mdc") || e.name.endsWith(".md"))) {
+          addIfFile(path.join(cursorRulesDir, e.name), "cursor_rule");
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 4. Local OpenMemory / Mem0 JSON dumps (~/.openmemory, ~/.mem0)
+  for (const localDir of [path.join(home, ".openmemory"), path.join(home, ".mem0")]) {
+    if (fs.existsSync(localDir)) {
+      try {
+        for (const e of fs.readdirSync(localDir, { withFileTypes: true })) {
+          if (e.isFile() && (e.name.endsWith(".json") || e.name.endsWith(".jsonl"))) {
+            addIfFile(path.join(localDir, e.name), "local_memory_dump");
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return candidates;
+}
+
+async function runImportLocalCommand(opts) {
+  const workspaceDir = opts.repo ? path.resolve(opts.repo) : process.cwd();
+  const projectId = path.basename(workspaceDir.replace(/[\\/]+$/, "")) || "default";
+  const discoveredFiles = discoverLocalAgentMemoryFiles(workspaceDir);
+  const allRecords = [];
+
+  for (const item of discoveredFiles) {
+    try {
+      const raw = fs.readFileSync(item.path, "utf8");
+      const parsedRecords = parseMemoriesFromFileContent(raw, item.path, opts.userId || "default").map((r) => ({
+        ...r,
+        id: makeMigrationDocId("local", r.text, opts.userId || "default"),
+        metadata: {
+          ...(r.metadata || {}),
+          source_kind: item.kind,
+          source_file: path.basename(item.path),
+          project_id: projectId,
+        },
+      }));
+      allRecords.push(...parsedRecords);
+    } catch {
+      // ignore unreadable file
+    }
+  }
+
+  const res = await batchIngestMigratedRecords(opts, allRecords);
+  const payload = {
+    status: opts.isDryRun ? "dry_run" : "imported_local",
+    scanned_files: discoveredFiles.map((f) => f.path),
+    project_id: projectId,
+    user_id: opts.userId || "default",
+    ...res,
+  };
+
+  if (opts.jsonOutput) {
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+  } else {
+    console.log(
+      `[/ ml] ${opts.isDryRun ? "[DRY RUN] Discovered" : "Imported"} ${res.ingested_count || res.total_discovered} local coding-agent memories across ${discoveredFiles.length} file(s) into / ml (project=${projectId}, user_id=${payload.user_id}).`
+    );
+  }
+}
+
+if (parsed.isMigrate) {
+  runMigrateCommand(parsed)
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(`Error: ${err.message || err}`);
+      process.exit(1);
+    });
+  return;
+}
+
+if (parsed.isImportLocal) {
+  runImportLocalCommand(parsed)
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(`Error: ${err.message || err}`);
+      process.exit(1);
+    });
+  return;
 }
 
 if (parsed.isInstallHooks) {
