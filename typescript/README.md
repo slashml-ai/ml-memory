@@ -11,7 +11,7 @@ npm install @slashml/memory
 Configure your API key in the environment:
 
 ```bash
-export SLASHML_API_KEY="ml-live-..."
+export SLASHML_API_KEY="sml_live_..."
 ```
 
 ## Quickstart (Mem0 Drop-in Replacement)
@@ -88,6 +88,34 @@ const decision = await client.intervene("aws ec2 run-instances --placement Avail
   toolName: "Bash",
   userId: "team_infra",
 });
+```
+
+## Inline Redaction & Per-Agent Read/Write Access Control
+
+```typescript
+import { Memory } from "@slashml/memory";
+
+const admin = new Memory({ apiKey: process.env.SLASHML_API_KEY });
+
+// Set workspace redaction defaults & configure a read-only agent policy
+await admin.setRedactionPolicy({
+  redactPolicy: "tier1_secrets",
+  redactScope: "recall_only",
+  accessMode: "read_write",
+});
+await admin.agents.set("support_triage_bot", {
+  accessMode: "read_only",
+  redactPolicy: "gdpr",
+  redactScope: "recall_only",
+});
+
+// Scoped agent client attaches X-SlashML-Agent-Id automatically
+const triage = new Memory({
+  apiKey: process.env.SLASHML_API_KEY,
+  agentId: "support_triage_bot",
+});
+const masked = await triage.redact({ text: "Contact alice@acme.io for billing" });
+const hits = await triage.search("Who handles billing?", { userId: "alice" });
 ```
 
 ---

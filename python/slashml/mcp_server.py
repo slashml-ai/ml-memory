@@ -145,6 +145,9 @@ def configure_mcp_targets(
     api_key: str | None = None,
     repo: str | None = None,
     write_env: bool = False,
+    agent_id: str | None = None,
+    redact_policy: str | None = None,
+    redact_scope: str | None = None,
 ) -> list[str]:
     home = Path.home()
     cwd = Path.cwd()
@@ -171,8 +174,20 @@ def configure_mcp_targets(
         "args": args,
     }
     resolved_key = api_key or os.environ.get("SLASHML_API_KEY")
+    resolved_agent_id = agent_id or os.environ.get("SLASHML_AGENT_ID")
+    resolved_policy = redact_policy or os.environ.get("SLASHML_REDACT_POLICY")
+    resolved_scope = redact_scope or os.environ.get("SLASHML_REDACT_SCOPE")
+    env_map: dict[str, str] = {}
     if resolved_key:
-        server_entry["env"] = {"SLASHML_API_KEY": resolved_key}
+        env_map["SLASHML_API_KEY"] = resolved_key
+    if resolved_agent_id:
+        env_map["SLASHML_AGENT_ID"] = str(resolved_agent_id)
+    if resolved_policy:
+        env_map["SLASHML_REDACT_POLICY"] = str(resolved_policy)
+    if resolved_scope:
+        env_map["SLASHML_REDACT_SCOPE"] = str(resolved_scope)
+    if env_map:
+        server_entry["env"] = env_map
     if write_env and resolved_key:
         _save_api_key_to_env(resolved_key, cwd)
 
@@ -234,6 +249,9 @@ class SlashMLMCPServer:
         api_key: str | None = None,
         base_url: str | None = None,
         user_id: str = "default",
+        agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
         code_only: bool = False,
         code_mode: bool = False,
         repo_path: str | Path | None = None,
@@ -242,6 +260,9 @@ class SlashMLMCPServer:
         self.client = MemoryClient(
             api_key=api_key,
             base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
             transport=transport,
         )
         self.user_id = user_id
@@ -257,7 +278,7 @@ class SlashMLMCPServer:
                     "name": "execute_memory_code",
                     "description": (
                         "Compact meta-tool (91% token savings) dispatching memory & code actions "
-                        "(`add_memory`, `search_memories`, `get_memories`, `forget_memory`, "
+                        "(`add_memory`, `search_memories`, `get_memories`, `forget_memory`, `redact_memory`, "
                         "`index_repository`, `search_code_by_behavior`, `find_bug_candidates`, "
                         "`intervene_memory`) "
                         "to `/ ml` Cloud."
@@ -272,6 +293,7 @@ class SlashMLMCPServer:
                                     "search_memories",
                                     "get_memories",
                                     "forget_memory",
+                                    "redact_memory",
                                     "index_repository",
                                     "search_code_by_behavior",
                                     "find_bug_candidates",
@@ -361,7 +383,7 @@ class SlashMLMCPServer:
                 "name": "search_memories",
                 "description": (
                     "Retrieve relevant conversational memories, user constraints, and project decisions "
-                    "(excludes indexed code_symbol chunks by default unless include_code=true)."
+                    "(excludes indexed repository code by default unless include_code=true)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -379,7 +401,7 @@ class SlashMLMCPServer:
                 "name": "get_memories",
                 "description": (
                     "List stored conversational memories for a user or project scope "
-                    "(excludes indexed code_symbol chunks by default unless include_code=true)."
+                    "(excludes indexed repository code by default unless include_code=true)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -393,13 +415,36 @@ class SlashMLMCPServer:
             },
             {
                 "name": "forget_memory",
-                "description": "Delete a specific memory by ID.",
+                "description": "Delete a specific memory by ID (or permanently purge with purge=true).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "memory_id": {"type": "string"},
+                        "purge": {"type": "boolean", "default": False},
+                        "reason": {"type": "string"},
                     },
                     "required": ["memory_id"],
+                },
+            },
+            {
+                "name": "redact_memory",
+                "description": (
+                    "Redact sensitive categories (SECRET, PCI_FINANCIAL, PII, PHI, COMMERCIAL_MNPI, "
+                    "LEGAL_HR, SECURITY_EXPLOIT) from raw text (stateless) or an existing stored memory_id in-place."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "memory_id": {"type": "string"},
+                        "redact_policy": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ]
+                        },
+                        "dry_run": {"type": "boolean", "default": False},
+                    },
                 },
             },
             {
@@ -435,6 +480,9 @@ class SlashMLMCPServer:
                 user_id=uid,
                 memory_id=args.get("memory_id"),
                 metadata=args.get("metadata"),
+                redact_policy=args.get("redact_policy") or args.get("sanitize_policy"),
+                redact_scope=args.get("redact_scope") or args.get("sanitize_scope"),
+                caller_agent_id=args.get("caller_agent_id"),
             )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
 
@@ -447,6 +495,9 @@ class SlashMLMCPServer:
                 user_id=uid,
                 limit=int(args.get("limit", 5)),
                 filters=merged_filters if merged_filters else None,
+                redact_policy=args.get("redact_policy") or args.get("sanitize_policy"),
+                redact_scope=args.get("redact_scope") or args.get("sanitize_scope"),
+                caller_agent_id=args.get("caller_agent_id"),
             )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
 
@@ -458,11 +509,30 @@ class SlashMLMCPServer:
                 user_id=uid,
                 limit=int(args.get("limit", 50)),
                 filters=merged_filters if merged_filters else None,
+                redact_policy=args.get("redact_policy") or args.get("sanitize_policy"),
+                caller_agent_id=args.get("caller_agent_id"),
             )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
 
         if name == "forget_memory":
-            res = self.client.forget(memory_id=str(args["memory_id"]), user_id=uid)
+            res = self.client.forget(
+                memory_id=str(args["memory_id"]),
+                user_id=uid,
+                purge=bool(args.get("purge", False)),
+                reason=args.get("reason"),
+                caller_agent_id=args.get("caller_agent_id"),
+            )
+            return {"content": [{"type": "text", "text": json.dumps(res)}]}
+
+        if name in ("redact_memory", "sanitize_memory"):
+            res = self.client.redact(
+                text=args.get("text"),
+                memory_id=args.get("memory_id"),
+                redact_policy=args.get("redact_policy") or args.get("sanitize_policy"),
+                explicit_spans=args.get("explicit_spans"),
+                dry_run=bool(args.get("dry_run", False)),
+                caller_agent_id=args.get("caller_agent_id"),
+            )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
 
         if name == "index_repository":
@@ -526,6 +596,9 @@ class SlashMLMCPServer:
                 model=args.get("model") or os.environ.get("SLASHML_MODEL"),
                 commit_writes=bool(args.get("commit_writes", True)),
                 top_k=int(args.get("top_k") or args.get("limit") or 5),
+                redact_policy=args.get("redact_policy") or args.get("sanitize_policy"),
+                redact_scope=args.get("redact_scope") or args.get("sanitize_scope"),
+                caller_agent_id=args.get("caller_agent_id"),
             )
             return {"content": [{"type": "text", "text": json.dumps(res)}]}
 
@@ -633,7 +706,7 @@ class SlashMLMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": proto,
-                    "serverInfo": {"name": "ml-memory", "version": "1.0.11"},
+                    "serverInfo": {"name": "ml-memory", "version": "1.0.12"},
                     "capabilities": {"tools": {}},
                 },
             }
@@ -898,7 +971,7 @@ def install_ambient_hooks(
         if not quiet:
             print(f"Configured / ml ambient lifecycle hooks in {codex_hooks_path}")
 
-    # 5. Gemini CLI & Antigravity (~/.gemini/config/plugins/slashml-memory + ~/.gemini/GEMINI.md)
+    # 5. Gemini CLI (~/.gemini/config/plugins/slashml-memory + ~/.gemini/GEMINI.md)
     gemini_config_dir = home / ".gemini" / "config"
     gemini_plugins_root = gemini_config_dir / "plugins"
     gemini_plugin_dir = gemini_plugins_root / "slashml-memory"
@@ -1298,6 +1371,9 @@ def run_ambient_hook_mode(
     base_url: str | None = None,
     user_id: str = "default",
     repo: str | None = None,
+    agent_id: str | None = None,
+    redact_policy: str | list[str] | None = None,
+    redact_scope: str | None = None,
     transport: TransportCallable | None = None,
 ) -> int:
     raw_input = sys.stdin.read().strip()
@@ -1599,7 +1675,14 @@ def run_ambient_hook_mode(
     )
 
     try:
-        client = MemoryClient(api_key=resolved_key, base_url=base_url, transport=transport)
+        client = MemoryClient(
+            api_key=resolved_key,
+            base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
+            transport=transport,
+        )
         resp = client.intervene(
             stream_text_for_intervene,
             hook_event_name=hook_event,
@@ -1707,7 +1790,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(prog="slashml-mcp")
     parser.add_argument("command", nargs="?", default=None, help="Optional command (e.g. 'init')")
-    parser.add_argument("-v", "--version", action="version", version="1.0.11")
+    parser.add_argument("-v", "--version", action="version", version="1.0.12")
     parser.add_argument("--init", action="store_true", help="Configure ml-memory MCP in IDE configs")
     parser.add_argument("--skill", default=None, help="Skill or IDE target filter (e.g. ml-memory, cursor)")
     parser.add_argument("--api-key", default=None, help="SlashML Cloud API key (or SLASHML_API_KEY)")
@@ -1718,6 +1801,9 @@ def main(
         help="SlashML Console URL for CLI signup/verification",
     )
     parser.add_argument("--user-id", default="default", help="Default user/workspace namespace")
+    parser.add_argument("--agent-id", default=None, help="Caller agent identity (or SLASHML_AGENT_ID) for per-agent write permissions & redaction")
+    parser.add_argument("--redact-policy", default=None, help="Optional redaction policy preset or comma-separated buckets (or SLASHML_REDACT_POLICY)")
+    parser.add_argument("--redact-scope", default=None, help="Optional redaction scope: memorize_and_recall or recall_only (or SLASHML_REDACT_SCOPE)")
     parser.add_argument("--repo", "--workspace", dest="repo", default=None, help="Repository/workspace path to auto-index")
     parser.add_argument(
         "--signup",
@@ -1769,7 +1855,15 @@ def main(
         if args.write_env or args.init:
             env_path = _save_api_key_to_env(str(provisioned_key))
         if args.init:
-            configure_mcp_targets(skill=args.skill, api_key=str(provisioned_key), repo=args.repo, write_env=False)
+            configure_mcp_targets(
+                skill=args.skill,
+                api_key=str(provisioned_key),
+                repo=args.repo,
+                write_env=False,
+                agent_id=args.agent_id,
+                redact_policy=args.redact_policy,
+                redact_scope=args.redact_scope,
+            )
         res_payload: dict[str, Any] = {
             "status": "authenticated",
             "email": email,
@@ -1787,6 +1881,9 @@ def main(
             api_key=args.api_key,
             repo=args.repo,
             write_env=args.write_env,
+            agent_id=args.agent_id,
+            redact_policy=args.redact_policy,
+            redact_scope=args.redact_scope,
         )
         return 0
 
@@ -1808,12 +1905,18 @@ def main(
             base_url=args.base_url,
             user_id=args.user_id,
             repo=args.repo,
+            agent_id=args.agent_id,
+            redact_policy=args.redact_policy,
+            redact_scope=args.redact_scope,
         )
 
     server = SlashMLMCPServer(
         api_key=args.api_key,
         base_url=args.base_url,
         user_id=args.user_id,
+        agent_id=args.agent_id,
+        redact_policy=args.redact_policy,
+        redact_scope=args.redact_scope,
         code_only=args.code_only,
         code_mode=args.code_mode,
         repo_path=args.repo,

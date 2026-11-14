@@ -10,7 +10,7 @@ const readline = require("readline");
 
 const DEFAULT_BASE_URL = "https://api.slashml.ai";
 const DEFAULT_CONSOLE_URL = "https://app.slashml.ai";
-const PACKAGE_VERSION = "1.0.13";
+const PACKAGE_VERSION = "1.0.14";
 const MAX_STOP_BLOCKS_PER_PROMPT = 3;
 
 function printHelp() {
@@ -31,6 +31,9 @@ Options:
   --api-key <key>                SlashML API key (or set SLASHML_API_KEY env var)
   --workspace, --repo <path>     Optional workspace directory to scope/index (defaults to process.cwd() at runtime)
   --user-id <id>                 Default user/workspace namespace (default: SLASHML_USER_ID or "default")
+  --agent-id <id>                Caller agent identity for per-agent access & redaction policies (or SLASHML_AGENT_ID)
+  --redact-policy <policy>       Default redaction preset or comma-separated buckets (or SLASHML_REDACT_POLICY)
+  --redact-scope <scope>         Default redaction scope: memorize_and_recall | recall_only (or SLASHML_REDACT_SCOPE)
   --code-only                    Expose only code & bug-localization MCP tools
   --code-mode                    Expose compact single meta-tool (execute_memory_code)
   --init                         Write ml-memory MCP entry to Cursor, Windsurf, or .mcp.json
@@ -183,6 +186,9 @@ function parseCliArgs(argv) {
   let baseUrl = (process.env.SLASHML_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
   let consoleUrl = (process.env.SLASHML_CONSOLE_URL || DEFAULT_CONSOLE_URL).replace(/\/+$/, "");
   let userId = process.env.SLASHML_USER_ID || "default";
+  let agentId = (process.env.SLASHML_AGENT_ID || "").trim() || null;
+  let redactPolicy = (process.env.SLASHML_REDACT_POLICY || "").trim() || null;
+  let redactScope = (process.env.SLASHML_REDACT_SCOPE || "").trim() || null;
   let codeOnly = false;
   let codeMode = false;
   let passiveWrites = process.env.SLASHML_PASSIVE_WRITES === "1";
@@ -269,6 +275,12 @@ function parseCliArgs(argv) {
       consoleUrl = argv[++i].replace(/\/+$/, "");
     } else if (arg === "--user-id" && i + 1 < argv.length) {
       userId = argv[++i];
+    } else if (arg === "--agent-id" && i + 1 < argv.length) {
+      agentId = argv[++i].trim() || null;
+    } else if (arg === "--redact-policy" && i + 1 < argv.length) {
+      redactPolicy = argv[++i].trim() || null;
+    } else if (arg === "--redact-scope" && i + 1 < argv.length) {
+      redactScope = argv[++i].trim() || null;
     } else if ((arg === "--repo" || arg === "--workspace") && i + 1 < argv.length) {
       repo = argv[++i];
     } else if (arg === "--signup" && i + 1 < argv.length) {
@@ -302,6 +314,9 @@ function parseCliArgs(argv) {
     baseUrl,
     consoleUrl,
     userId,
+    agentId,
+    redactPolicy,
+    redactScope,
     codeOnly,
     codeMode,
     passiveWrites,
@@ -366,7 +381,7 @@ function saveApiKeyToEnvFile(apiKey, cwd = process.cwd()) {
 
 const GENERIC_SKILL_NAMES = new Set(["ml-memory", "/ml-memory", "slashml", "all", "default"]);
 
-function nativeNodeInit(skill, apiKey, repo = null, writeEnv = false) {
+function nativeNodeInit(skill, apiKey, repo = null, writeEnv = false, extraEnv = {}) {
   const home = os.homedir();
   const cwd = process.cwd();
   const targets = [
@@ -398,10 +413,21 @@ function nativeNodeInit(skill, apiKey, repo = null, writeEnv = false) {
     args,
   };
   const resolvedKey = apiKey || process.env.SLASHML_API_KEY;
+  const envMap = {};
   if (resolvedKey) {
-    serverEntry.env = {
-      SLASHML_API_KEY: resolvedKey,
-    };
+    envMap.SLASHML_API_KEY = resolvedKey;
+  }
+  if (extraEnv.agentId) {
+    envMap.SLASHML_AGENT_ID = extraEnv.agentId;
+  }
+  if (extraEnv.redactPolicy) {
+    envMap.SLASHML_REDACT_POLICY = extraEnv.redactPolicy;
+  }
+  if (extraEnv.redactScope) {
+    envMap.SLASHML_REDACT_SCOPE = extraEnv.redactScope;
+  }
+  if (Object.keys(envMap).length > 0) {
+    serverEntry.env = envMap;
   }
   if (writeEnv && resolvedKey) {
     saveApiKeyToEnvFile(resolvedKey, cwd);
@@ -498,7 +524,11 @@ async function runCliVerify(email, code, parsedArgs) {
     envSavedPath = path.join(process.cwd(), ".env");
   }
   if (parsedArgs.isInit) {
-    nativeNodeInit(parsedArgs.skill, provisionedKey, parsedArgs.repo, false);
+    nativeNodeInit(parsedArgs.skill, provisionedKey, parsedArgs.repo, false, {
+      agentId: parsedArgs.agentId,
+      redactPolicy: parsedArgs.redactPolicy,
+      redactScope: parsedArgs.redactScope,
+    });
   }
   console.log(
     JSON.stringify({
@@ -544,7 +574,11 @@ if (parsed.verifyEmail) {
 }
 
 if (parsed.isInit) {
-  nativeNodeInit(parsed.skill, parsed.apiKey, parsed.repo, parsed.writeEnv);
+  nativeNodeInit(parsed.skill, parsed.apiKey, parsed.repo, parsed.writeEnv, {
+    agentId: parsed.agentId,
+    redactPolicy: parsed.redactPolicy,
+    redactScope: parsed.redactScope,
+  });
   if (process.env.SLASHML_DISABLE_AUTO_HOOKS !== "1") {
     try {
       installAmbientHooks(parsed.apiKey, { quiet: false, onlyIfDirExists: false });
@@ -782,7 +816,7 @@ function installAmbientHooks(apiKey, opts = {}) {
     }
   }
 
-  // 5. Gemini CLI & Antigravity (~/.gemini/config/plugins/slashml-memory + ~/.gemini/GEMINI.md)
+  // 5. Gemini CLI (~/.gemini/config/plugins/slashml-memory + ~/.gemini/GEMINI.md)
   const geminiConfigDir = path.join(home, ".gemini", "config");
   const geminiPluginsRoot = path.join(geminiConfigDir, "plugins");
   let geminiPluginDir = path.join(geminiPluginsRoot, "slashml-memory");
@@ -1925,6 +1959,9 @@ async function runAmbientHookMode(opts) {
       user_id: opts.userId,
       ...(projectId ? { project_id: projectId } : {}),
       session_id: whisperKey,
+      ...(opts.redactPolicy ? { redact_policy: opts.redactPolicy } : {}),
+      ...(opts.redactScope ? { redact_scope: opts.redactScope } : {}),
+      ...(opts.agentId ? { caller_agent_id: opts.agentId } : {}),
       client_raw_tokens_delta: (telem.pending_raw_tokens_delta || 0) + strippedTokens,
       client_dropped_tokens_delta: (telem.pending_dropped_tokens_delta || 0) + strippedTokens,
       client_dropped_events_delta: telem.pending_dropped_events_delta || 0,
@@ -2601,6 +2638,9 @@ async function scanSandboxTranscriptsOnce(opts, state) {
             user_id: opts.userId || "default",
             project_id: projectId,
             session_id: sessionId,
+            ...(opts.redactPolicy ? { redact_policy: opts.redactPolicy } : {}),
+            ...(opts.redactScope ? { redact_scope: opts.redactScope } : {}),
+            ...(opts.agentId ? { caller_agent_id: opts.agentId } : {}),
           });
           processedEvents += 1;
           telem.conversation_tokens_processed = (telem.conversation_tokens_processed || 0) + rawTok;
@@ -3579,13 +3619,41 @@ const STANDARD_TOOLS = [
   },
   {
     name: "forget_memory",
-    description: "Delete a specific memory by ID.",
+    description: "Delete or permanently purge a specific memory by ID.",
     inputSchema: {
       type: "object",
       properties: {
         memory_id: { type: "string" },
+        purge: {
+          type: "boolean",
+          description: "When true, irreversibly purges the memory and returns a bounded undo_token.",
+          default: false,
+        },
+        reason: { type: "string" },
       },
       required: ["memory_id"],
+    },
+  },
+  {
+    name: "redact_memory",
+    description:
+      "Redact sensitive spans (secrets, PCI/financial, PII, PHI, commercial MNPI, legal/HR, security exploits) from raw text or an existing stored memory.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Raw text to redact (when not redacting an existing memory_id)." },
+        memory_id: { type: "string", description: "Optional stored memory ID to redact in place." },
+        redact_policy: {
+          oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+          description:
+            "Preset ('tier1_secrets', 'soc2_coding', 'gdpr', 'hipaa', 'enterprise_strict') or array of bucket names.",
+        },
+        dry_run: {
+          type: "boolean",
+          description: "Preview redacted_text and redacted_spans without mutating stored memory.",
+          default: false,
+        },
+      },
     },
   },
   {
@@ -3663,7 +3731,7 @@ const CODE_MODE_TOOLS = [
   {
     name: "execute_memory_code",
     description:
-      "Compact meta-tool (91% token savings) dispatching memory & code actions (`add_memory`, `search_memories`, `get_memories`, `forget_memory`, `index_repository`, `search_code_by_behavior`, `find_bug_candidates`, `intervene_memory`) to `/ ml` Cloud.",
+      "Compact meta-tool (91% token savings) dispatching memory & code actions (`add_memory`, `search_memories`, `get_memories`, `forget_memory`, `redact_memory`, `index_repository`, `search_code_by_behavior`, `find_bug_candidates`, `intervene_memory`) to `/ ml` Cloud.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3674,6 +3742,7 @@ const CODE_MODE_TOOLS = [
             "search_memories",
             "get_memories",
             "forget_memory",
+            "redact_memory",
             "index_repository",
             "search_code_by_behavior",
             "find_bug_candidates",
@@ -3694,13 +3763,17 @@ async function apiRequest(opts, method, urlPath, body) {
       "SlashML API key is required. Set SLASHML_API_KEY in your environment or pass --api-key."
     );
   }
+  const headers = {
+    Authorization: `Bearer ${opts.apiKey}`,
+    "Content-Type": "application/json",
+    "User-Agent": `slashml-cli-node/${PACKAGE_VERSION}`,
+  };
+  if (opts.agentId) {
+    headers["X-SlashML-Agent-Id"] = opts.agentId;
+  }
   const res = await fetch(`${opts.baseUrl}${urlPath}`, {
     method,
-    headers: {
-      Authorization: `Bearer ${opts.apiKey}`,
-      "Content-Type": "application/json",
-      "User-Agent": "slashml-cli-node/1.0.0",
-    },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -3864,6 +3937,16 @@ async function dispatchTool(opts, name, args = {}) {
     return dispatchTool(opts, args.action, args.params || {});
   }
   const uid = args.user_id || opts.userId;
+  const effRedactPolicy = args.redact_policy !== undefined ? args.redact_policy : opts.redactPolicy;
+  const effRedactScope = args.redact_scope !== undefined ? args.redact_scope : opts.redactScope;
+  const effAgentId = args.caller_agent_id || opts.agentId || null;
+
+  function withLifecycle(payload) {
+    if (effRedactPolicy) payload.redact_policy = effRedactPolicy;
+    if (effRedactScope) payload.redact_scope = effRedactScope;
+    if (effAgentId) payload.caller_agent_id = effAgentId;
+    return payload;
+  }
 
   if (name === "add_memory") {
     const rawText = args.text !== undefined ? args.text : args.messages;
@@ -3877,12 +3960,17 @@ async function dispatchTool(opts, name, args = {}) {
             ...(args.metadata ? { metadata: args.metadata } : {}),
           },
         ];
-    return apiRequest(opts, "POST", "/v1/memories", {
-      messages: messagesPayload,
-      user_id: uid,
-      memory_id: args.memory_id,
-      metadata: args.metadata || {},
-    });
+    return apiRequest(
+      opts,
+      "POST",
+      "/v1/memories",
+      withLifecycle({
+        messages: messagesPayload,
+        user_id: uid,
+        memory_id: args.memory_id,
+        metadata: args.metadata || {},
+      })
+    );
   }
   if (name === "search_memories") {
     const k = Number(args.limit || args.top_k || 5);
@@ -3891,23 +3979,54 @@ async function dispatchTool(opts, name, args = {}) {
       ...(args.include_code !== undefined ? { include_code: Boolean(args.include_code) } : {}),
       ...(args.kind ? { kind: String(args.kind) } : {}),
     };
-    return apiRequest(opts, "POST", "/v1/memories/search", {
-      query: args.query,
-      user_id: uid,
-      limit: k,
-      top_k: k,
-      ...(Object.keys(mergedFilters).length > 0 ? { filters: mergedFilters } : {}),
-    });
+    return apiRequest(
+      opts,
+      "POST",
+      "/v1/memories/search",
+      withLifecycle({
+        query: args.query,
+        user_id: uid,
+        limit: k,
+        top_k: k,
+        ...(Object.keys(mergedFilters).length > 0 ? { filters: mergedFilters } : {}),
+      })
+    );
   }
   if (name === "get_memories") {
     const paramsObj = { user_id: uid, limit: String(args.limit || 50) };
     if (args.include_code !== undefined) paramsObj.include_code = String(Boolean(args.include_code));
     if (args.kind) paramsObj.kind = String(args.kind);
+    if (effRedactPolicy) {
+      paramsObj.redact_policy = Array.isArray(effRedactPolicy)
+        ? effRedactPolicy.join(",")
+        : String(effRedactPolicy);
+    }
+    if (effRedactScope) paramsObj.redact_scope = String(effRedactScope);
     const q = new URLSearchParams(paramsObj);
     return apiRequest(opts, "GET", `/v1/memories?${q.toString()}`);
   }
   if (name === "forget_memory") {
+    if (args.purge) {
+      return apiRequest(
+        opts,
+        "POST",
+        "/v1/memory/purge",
+        withLifecycle({
+          memory_ids: [String(args.memory_id)],
+          ...(args.reason ? { reason: String(args.reason) } : {}),
+          ...(args.dry_run !== undefined ? { dry_run: Boolean(args.dry_run) } : {}),
+        })
+      );
+    }
     return apiRequest(opts, "DELETE", `/v1/memories/${encodeURIComponent(args.memory_id)}`);
+  }
+  if (name === "redact_memory" || name === "sanitize_memory") {
+    const body = {};
+    if (args.text !== undefined) body.text = String(args.text);
+    if (args.memory_id) body.memory_id = String(args.memory_id);
+    if (args.explicit_spans !== undefined) body.explicit_spans = args.explicit_spans;
+    if (args.dry_run !== undefined) body.dry_run = Boolean(args.dry_run);
+    return apiRequest(opts, "POST", "/v1/memory/redact", withLifecycle(body));
   }
   if (name === "index_repository") {
     const rawPath = args.path || args.repo_path || opts.repo || ".";
@@ -3932,10 +4051,15 @@ async function dispatchTool(opts, name, args = {}) {
     let lastRes = {};
     for (let i = 0; i < documents.length; i += BATCH_SIZE) {
       const batch = documents.slice(i, i + BATCH_SIZE);
-      const res = await apiRequest(opts, "POST", "/v1/memory/ingest", {
-        documents: batch,
-        user_id: uid,
-      });
+      const res = await apiRequest(
+        opts,
+        "POST",
+        "/v1/memory/ingest",
+        withLifecycle({
+          documents: batch,
+          user_id: uid,
+        })
+      );
       lastRes = res || {};
       totalIngested += Number(res?.ingested_count ?? res?.count ?? batch.length);
       totalTokens += Number(res?.tokens_processed ?? 0);
@@ -3955,26 +4079,36 @@ async function dispatchTool(opts, name, args = {}) {
   }
   if (name === "search_code_by_behavior") {
     const k = Number(args.top_k || args.limit || 5);
-    return apiRequest(opts, "POST", "/v1/memories/search", {
-      query: args.query,
-      user_id: uid,
-      limit: k,
-      top_k: k,
-      filters: { kind: "code_symbol", ...(args.language ? { language: args.language } : {}) },
-    });
+    return apiRequest(
+      opts,
+      "POST",
+      "/v1/memories/search",
+      withLifecycle({
+        query: args.query,
+        user_id: uid,
+        limit: k,
+        top_k: k,
+        filters: { kind: "code_symbol", ...(args.language ? { language: args.language } : {}) },
+      })
+    );
   }
   if (name === "find_bug_candidates") {
     const k = Number(args.top_k || args.limit || 5);
     const combinedQuery = args.stack_trace
       ? `${args.bug_description}\n${args.stack_trace}`
       : args.bug_description;
-    return apiRequest(opts, "POST", "/v1/memories/search", {
-      query: combinedQuery,
-      user_id: uid,
-      limit: k,
-      top_k: k,
-      filters: { kind: "code_symbol" },
-    });
+    return apiRequest(
+      opts,
+      "POST",
+      "/v1/memories/search",
+      withLifecycle({
+        query: combinedQuery,
+        user_id: uid,
+        limit: k,
+        top_k: k,
+        filters: { kind: "code_symbol" },
+      })
+    );
   }
   if (name === "intervene_memory") {
     const rawText = String(args.text || args.prompt || "");
@@ -3987,21 +4121,26 @@ async function dispatchTool(opts, name, args = {}) {
       ...(Array.isArray(args.dismiss_memory_ids) ? args.dismiss_memory_ids : []),
       ...(args.override_memory_id ? [String(args.override_memory_id)] : []),
     ].filter(Boolean);
-    return apiRequest(opts, "POST", "/v1/memory/intervene", {
-      hook_event_name: args.hook_event_name || "UserPromptSubmit",
-      prompt: args.prompt || rawText,
-      text: rawText,
-      tool_name: args.tool_name || null,
-      tool_input: args.tool_input || null,
-      tool_response: args.tool_response || null,
-      ...(overriddenIds.length > 0 ? { overridden_memory_ids: overriddenIds } : {}),
-      model: args.model || process.env.SLASHML_MODEL || undefined,
-      user_id: uid,
-      ...(resolvedProjectId ? { project_id: String(resolvedProjectId) } : {}),
-      ...(resolvedSessionId ? { session_id: String(resolvedSessionId) } : {}),
-      commit_writes: args.commit_writes !== undefined ? Boolean(args.commit_writes) : true,
-      top_k: Number(args.top_k || args.limit || 5),
-    });
+    return apiRequest(
+      opts,
+      "POST",
+      "/v1/memory/intervene",
+      withLifecycle({
+        hook_event_name: args.hook_event_name || "UserPromptSubmit",
+        prompt: args.prompt || rawText,
+        text: rawText,
+        tool_name: args.tool_name || null,
+        tool_input: args.tool_input || null,
+        tool_response: args.tool_response || null,
+        ...(overriddenIds.length > 0 ? { overridden_memory_ids: overriddenIds } : {}),
+        model: args.model || process.env.SLASHML_MODEL || undefined,
+        user_id: uid,
+        ...(resolvedProjectId ? { project_id: String(resolvedProjectId) } : {}),
+        ...(resolvedSessionId ? { session_id: String(resolvedSessionId) } : {}),
+        commit_writes: args.commit_writes !== undefined ? Boolean(args.commit_writes) : true,
+        top_k: Number(args.top_k || args.limit || 5),
+      })
+    );
   }
   if (name === "dismiss_intervention") {
     const memIds = [
@@ -4144,7 +4283,12 @@ rl.on("line", (line) => {
         const tools = parsed.codeMode
           ? CODE_MODE_TOOLS
           : parsed.codeOnly
-            ? STANDARD_TOOLS.slice(5)
+            ? STANDARD_TOOLS.filter(
+                (t) =>
+                  t.name === "index_repository" ||
+                  t.name === "search_code_by_behavior" ||
+                  t.name === "find_bug_candidates"
+              )
             : parsed.passiveWrites
               ? STANDARD_TOOLS.filter((t) => t.name !== "add_memory")
               : STANDARD_TOOLS;

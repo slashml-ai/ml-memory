@@ -17,8 +17,17 @@ class SlashMLCrewAIMemory:
         api_key: str | None = None,
         base_url: str | None = None,
         crew_id: str = "default_crew",
+        agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
     ) -> None:
-        self.client = client or MemoryClient(api_key=api_key, base_url=base_url)
+        self.client = client or MemoryClient(
+            api_key=api_key,
+            base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
+        )
         self.crew_id = crew_id
 
     def save(self, value: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:

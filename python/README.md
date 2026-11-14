@@ -60,10 +60,36 @@ decision = client.intervene(
 )
 ```
 
-### 3. CLI & Ambient Hook Installation
+### 3. Inline Redaction & Per-Agent Read/Write Access Control
+
+```python
+from slashml import Memory
+
+admin = Memory(api_key="sml_live_...")
+
+# Configure workspace defaults & bind a read-only, GDPR-masked support agent
+admin.set_redaction_policy(
+    redact_policy="tier1_secrets",
+    redact_scope="recall_only",
+    access_mode="read_write",
+)
+admin.configure_agent(
+    agent_id="support_triage_bot",
+    access_mode="read_only",
+    redact_policy="gdpr",
+    redact_scope="recall_only",
+)
+
+# Scoped agent client automatically attaches X-SlashML-Agent-Id
+triage = Memory(api_key="sml_live_...", agent_id="support_triage_bot")
+masked = triage.redact(text="Billing contact is alice@acme.io")
+recalled = triage.search("Who is the billing contact?", user_id="developer_1")
+```
+
+### 4. CLI & Ambient Hook Installation
 
 ```bash
-python -m slashml.mcp_server --install-hooks --api-key "$SLASHML_API_KEY"
+python -m slashml.mcp_server --install-hooks --api-key "$SLASHML_API_KEY" --agent-id "coding_agent" --redact-policy "soc2_coding"
 ```
 
 ## License

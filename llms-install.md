@@ -19,7 +19,9 @@ Add the following entry under `mcpServers`:
         "@slashml/mcp"
       ],
       "env": {
-        "SLASHML_API_KEY": "YOUR_SLASHML_API_KEY"
+        "SLASHML_API_KEY": "YOUR_SLASHML_API_KEY",
+        "SLASHML_AGENT_ID": "optional_agent_id",
+        "SLASHML_REDACT_POLICY": "optional_preset_such_as_soc2_coding"
       }
     }
   }
@@ -48,4 +50,4 @@ gemini extensions install https://github.com/slashml-ai/gemini-slashml-memory
 ```
 
 ## 4. Verification
-Run `npx -y @slashml/mcp --version` to verify the binary resolves cleanly (`1.0.12`), or check the Official MCP Registry listings `ai.slashml/ml-memory` and `ai.slashml/slashml-robotics`.
+Run `npx -y @slashml/mcp --version` to verify the binary resolves cleanly (`1.0.14`), or check the Official MCP Registry listings `ai.slashml/ml-memory` and `ai.slashml/slashml-robotics`.

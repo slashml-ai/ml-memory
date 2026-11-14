@@ -1,10 +1,10 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "ai.slashml/ml-memory",
-  "title": "SlashML (/ ml) Persistent Agent Memory & Code Localization",
-  "description": "Sub-millisecond persistent memory, behavioral code search, and bug localization for AI agents.",
+  "title": "SlashML (/ ml) Persistent Agent Memory, Redaction & Code Localization",
+  "description": "Persistent memory, inline redaction, per-agent access, and code localization for AI agents.",
   "websiteUrl": "https://slashml.ai",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "icons": [
     {
       "src": "https://slashml.ai/icon.png",

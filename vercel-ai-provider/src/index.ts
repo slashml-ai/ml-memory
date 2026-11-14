@@ -17,6 +17,12 @@ export interface VercelMemoryConfig {
   userId?: string | null;
   agent_id?: string | null;
   agentId?: string | null;
+  caller_agent_id?: string | null;
+  callerAgentId?: string | null;
+  redact_policy?: string | string[] | null;
+  redactPolicy?: string | string[] | null;
+  redact_scope?: string | null;
+  redactScope?: string | null;
   app_id?: string | null;
   appId?: string | null;
   run_id?: string | null;
@@ -176,14 +182,21 @@ async function callSlashML(
   const headers: Record<string, string> = {
     Accept: "application/json",
     "Content-Type": "application/json",
-    "User-Agent": "slashml-vercel-ai-provider/1.0.0",
+    "User-Agent": "slashml-vercel-ai-provider/1.0.3",
     Authorization: `Bearer ${apiKey}`,
     "X-API-Key": apiKey,
   };
   const orgId = config.org_id ?? config.orgId ?? getEnv("SLASHML_ORG_ID");
   const projectId = config.project_id ?? config.projectId ?? getEnv("SLASHML_PROJECT_ID");
+  const callerAgent =
+    config.caller_agent_id ??
+    config.callerAgentId ??
+    config.agent_id ??
+    config.agentId ??
+    getEnv("SLASHML_AGENT_ID");
   if (orgId) headers["X-SlashML-Org-Id"] = String(orgId);
   if (projectId) headers["X-SlashML-Project-Id"] = String(projectId);
+  if (callerAgent) headers["X-SlashML-Agent-Id"] = String(callerAgent);
 
   const fetchFn = config.fetchImpl ?? globalThis.fetch;
   const maxRetries = config.maxRetries ?? 3;
@@ -258,6 +271,12 @@ export async function getMemories(
 
   const userId = config.user_id ?? config.userId ?? undefined;
   const agentId = config.agent_id ?? config.agentId ?? undefined;
+  const callerAgentId =
+    config.caller_agent_id ?? config.callerAgentId ?? agentId ?? getEnv("SLASHML_AGENT_ID") ?? undefined;
+  const redactPolicy =
+    config.redact_policy ?? config.redactPolicy ?? getEnv("SLASHML_REDACT_POLICY") ?? undefined;
+  const redactScope =
+    config.redact_scope ?? config.redactScope ?? getEnv("SLASHML_REDACT_SCOPE") ?? undefined;
   const appId = config.app_id ?? config.appId ?? undefined;
   const runId = config.run_id ?? config.runId ?? undefined;
   const limit = config.top_k ?? config.limit ?? 5;
@@ -274,6 +293,9 @@ export async function getMemories(
         top_k: limit,
         filters: config.filters ?? config.metadata ?? null,
         threshold: config.threshold ?? null,
+        ...(callerAgentId ? { caller_agent_id: callerAgentId } : {}),
+        ...(redactPolicy !== undefined ? { redact_policy: redactPolicy } : {}),
+        ...(redactScope !== undefined ? { redact_scope: redactScope } : {}),
       },
     });
     if (Array.isArray(res)) return res as Array<Record<string, unknown>>;
@@ -289,6 +311,14 @@ export async function getMemories(
       app_id: appId,
       run_id: runId,
       limit: config.limit ?? 100,
+      ...(redactPolicy !== undefined
+        ? {
+            redact_policy: Array.isArray(redactPolicy)
+              ? redactPolicy.join(",")
+              : redactPolicy,
+          }
+        : {}),
+      ...(redactScope !== undefined ? { redact_scope: redactScope } : {}),
     },
   });
   if (Array.isArray(res)) return res as Array<Record<string, unknown>>;
@@ -329,6 +359,17 @@ export async function addMemories(
   config: VercelMemoryConfig = {},
 ): Promise<Record<string, unknown>> {
   const normalized = normalizeMessages(messages);
+  const callerAgentId =
+    config.caller_agent_id ??
+    config.callerAgentId ??
+    config.agent_id ??
+    config.agentId ??
+    getEnv("SLASHML_AGENT_ID") ??
+    undefined;
+  const redactPolicy =
+    config.redact_policy ?? config.redactPolicy ?? getEnv("SLASHML_REDACT_POLICY") ?? undefined;
+  const redactScope =
+    config.redact_scope ?? config.redactScope ?? getEnv("SLASHML_REDACT_SCOPE") ?? undefined;
   return callSlashML("POST", "/v1/memories", config, {
     jsonBody: {
       messages: normalized,
@@ -338,6 +379,51 @@ export async function addMemories(
       run_id: config.run_id ?? config.runId ?? null,
       metadata: config.metadata ?? {},
       infer: true,
+      ...(callerAgentId ? { caller_agent_id: callerAgentId } : {}),
+      ...(redactPolicy !== undefined ? { redact_policy: redactPolicy } : {}),
+      ...(redactScope !== undefined ? { redact_scope: redactScope } : {}),
+    },
+  });
+}
+
+/**
+ * Redact sensitive spans statelessly (`text`) or in-place on a stored `memoryId` / `memory_id`.
+ */
+export async function redactMemory(
+  textOrOptions:
+    | string
+    | {
+        text?: string;
+        memoryId?: string;
+        memory_id?: string;
+        redactPolicy?: string | string[];
+        redact_policy?: string | string[];
+      },
+  config: VercelMemoryConfig = {},
+): Promise<Record<string, unknown>> {
+  const opts =
+    typeof textOrOptions === "string" ? { text: textOrOptions } : (textOrOptions ?? {});
+  const memoryId = opts.memory_id ?? opts.memoryId;
+  const redactPolicy =
+    opts.redact_policy ??
+    opts.redactPolicy ??
+    config.redact_policy ??
+    config.redactPolicy ??
+    getEnv("SLASHML_REDACT_POLICY") ??
+    undefined;
+  const callerAgentId =
+    config.caller_agent_id ??
+    config.callerAgentId ??
+    config.agent_id ??
+    config.agentId ??
+    getEnv("SLASHML_AGENT_ID") ??
+    undefined;
+  return callSlashML("POST", "/v1/memory/redact", config, {
+    jsonBody: {
+      ...(opts.text !== undefined ? { text: opts.text } : {}),
+      ...(memoryId !== undefined ? { memory_id: memoryId } : {}),
+      ...(redactPolicy !== undefined ? { redact_policy: redactPolicy } : {}),
+      ...(callerAgentId ? { caller_agent_id: callerAgentId } : {}),
     },
   });
 }
@@ -347,7 +433,21 @@ function mergeConfig(
   callConfig: VercelMemoryConfig = {},
 ): VercelMemoryConfig {
   const nested = baseSettings.slashmlConfig ?? baseSettings.mem0Config ?? {};
-  return {
+  const baseAgentId =
+    baseSettings.agent_id ??
+    baseSettings.agentId ??
+    nested.agent_id ??
+    nested.agentId;
+  const callAgentId = callConfig.agent_id ?? callConfig.agentId;
+  const hasUserScope = Boolean(
+    callConfig.user_id ??
+      callConfig.userId ??
+      baseSettings.user_id ??
+      baseSettings.userId ??
+      nested.user_id ??
+      nested.userId,
+  );
+  const merged: VercelMemoryConfig = {
     ...baseSettings,
     ...nested,
     ...callConfig,
@@ -364,6 +464,15 @@ function mergeConfig(
       getEnv("SLASHML_API_KEY") ||
       getEnv("MEM0_API_KEY"),
   };
+  if (baseAgentId && !callAgentId) {
+    merged.caller_agent_id =
+      merged.caller_agent_id ?? merged.callerAgentId ?? String(baseAgentId);
+    if (hasUserScope) {
+      delete merged.agent_id;
+      delete merged.agentId;
+    }
+  }
+  return merged;
 }
 
 export class SlashMLAILanguageModel {
@@ -396,6 +505,20 @@ export class SlashMLAILanguageModel {
 
   async addMemories(messages: PromptInput): Promise<Record<string, unknown>> {
     return addMemories(messages, this.config);
+  }
+
+  async redactMemory(
+    textOrOptions:
+      | string
+      | {
+          text?: string;
+          memoryId?: string;
+          memory_id?: string;
+          redactPolicy?: string | string[];
+          redact_policy?: string | string[];
+        },
+  ): Promise<Record<string, unknown>> {
+    return redactMemory(textOrOptions, this.config);
   }
 
   private async prepareCall(options: Record<string, unknown> = {}) {

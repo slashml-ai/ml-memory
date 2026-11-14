@@ -5,17 +5,40 @@
  * 100% drop-in replacement for `mem0ai` (`MemoryClient`, `AsyncMemoryClient`, `Memory`, `AsyncMemory`).
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AsyncSlashMLClient = exports.AsyncSlashMLMemory = exports.SlashMLClient = exports.SlashMLMemory = exports.AsyncMemory = exports.AsyncMemoryClient = exports.Memory = exports.MemoryClient = exports.ProjectManager = exports.SlashMLAPIError = exports.DEFAULT_TIMEOUT_MS = exports.DEFAULT_MODEL = exports.DEFAULT_BASE_URL = void 0;
+exports.AsyncSlashMLClient = exports.AsyncSlashMLMemory = exports.SlashMLClient = exports.SlashMLMemory = exports.AsyncMemory = exports.AsyncMemoryClient = exports.Memory = exports.MemoryClient = exports.AgentsManager = exports.ProjectManager = exports.SlashMLAPIError = exports.DEFAULT_TIMEOUT_MS = exports.DEFAULT_MODEL = exports.DEFAULT_BASE_URL = void 0;
 exports.DEFAULT_BASE_URL = "https://api.slashml.ai";
 exports.DEFAULT_MODEL = "slashml-1.5-fast";
 exports.DEFAULT_TIMEOUT_MS = 30_000;
+function normalizeRedactPolicy(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    if (Array.isArray(value)) {
+        const cleaned = value.map((v) => String(v).trim()).filter(Boolean);
+        return cleaned.length > 0 ? cleaned : null;
+    }
+    const raw = String(value).trim();
+    if (!raw) {
+        return null;
+    }
+    if (raw.includes(",")) {
+        const parts = raw
+            .split(",")
+            .map((p) => p.trim())
+            .filter(Boolean);
+        return parts.length > 0 ? parts : null;
+    }
+    return raw;
+}
 class SlashMLAPIError extends Error {
     statusCode;
+    status;
     details;
     constructor(statusCode, message, details = {}) {
         super(`SlashMLAPIError (${statusCode}): ${message}`);
         this.name = "SlashMLAPIError";
         this.statusCode = statusCode;
+        this.status = statusCode;
         this.details = details;
     }
 }
@@ -26,6 +49,12 @@ function getEnv(name) {
         return g.process.env[name];
     }
     return undefined;
+}
+function wrapResults(res) {
+    if (Array.isArray(res)) {
+        return { results: res };
+    }
+    return res ?? {};
 }
 class ProjectManager {
     client;
@@ -123,14 +152,68 @@ class ProjectManager {
     }
 }
 exports.ProjectManager = ProjectManager;
+class AgentsManager {
+    client;
+    constructor(client) {
+        this.client = client;
+    }
+    async list() {
+        const res = await this.client.request("GET", "/v1/agents/");
+        return Array.isArray(res) ? { agents: res } : (res ?? {});
+    }
+    async configure(agentIdOrOptions, options = {}) {
+        const isObj = typeof agentIdOrOptions === "object" && agentIdOrOptions !== null;
+        const opts = isObj ? agentIdOrOptions : options;
+        const resolvedAgentId = isObj
+            ? (opts.agent_id ?? opts.agentId ?? "")
+            : agentIdOrOptions;
+        const payload = {
+            agent_id: String(resolvedAgentId).trim(),
+        };
+        if (opts.name !== undefined)
+            payload.name = opts.name;
+        const accessMode = opts.access_mode ?? opts.accessMode;
+        if (accessMode !== undefined)
+            payload.access_mode = accessMode;
+        const allowWrite = opts.allow_write ?? opts.allowWrite;
+        if (allowWrite !== undefined)
+            payload.allow_write = Boolean(allowWrite);
+        const redactPolicy = opts.redact_policy ?? opts.redactPolicy;
+        if (redactPolicy !== undefined) {
+            payload.redact_policy = normalizeRedactPolicy(redactPolicy);
+        }
+        const redactScope = opts.redact_scope ?? opts.redactScope;
+        if (redactScope !== undefined)
+            payload.redact_scope = redactScope;
+        if (opts.inherit_policy ?? opts.inheritPolicy)
+            payload.inherit_policy = true;
+        if (opts.inherit_access ?? opts.inheritAccess)
+            payload.inherit_access = true;
+        if (opts.metadata !== undefined)
+            payload.metadata = opts.metadata;
+        return this.client.request("POST", "/v1/agents/", { jsonBody: payload });
+    }
+    async upsert(agentIdOrOptions, options = {}) {
+        return this.configure(agentIdOrOptions, options);
+    }
+    async delete(agentId) {
+        return this.client.request("DELETE", `/v1/agents/${encodeURIComponent(String(agentId).trim())}/`);
+    }
+}
+exports.AgentsManager = AgentsManager;
 class MemoryClient {
     apiKey;
     baseUrl;
     orgId;
     projectId;
+    agentId;
+    callerAgentId;
+    redactPolicy;
+    redactScope;
     model;
     timeoutMs;
     project;
+    agents;
     fetchImpl;
     constructor(options = {}) {
         const resolvedKey = options.apiKey ||
@@ -148,14 +231,57 @@ class MemoryClient {
         const resolvedModel = options.model ||
             getEnv("SLASHML_MODEL") ||
             exports.DEFAULT_MODEL;
+        const rawAgentId = options.agentId ??
+            options.agent_id ??
+            options.callerAgentId ??
+            options.caller_agent_id ??
+            getEnv("SLASHML_AGENT_ID") ??
+            null;
+        const rawRedactPolicy = options.redactPolicy ??
+            options.redact_policy ??
+            getEnv("SLASHML_REDACT_POLICY") ??
+            null;
+        const rawRedactScope = options.redactScope ??
+            options.redact_scope ??
+            getEnv("SLASHML_REDACT_SCOPE") ??
+            null;
         this.apiKey = resolvedKey;
         this.baseUrl = resolvedUrl.replace(/\/+$/, "");
         this.orgId = options.orgId || options.org_id || getEnv("SLASHML_ORG_ID") || null;
         this.projectId = options.projectId || options.project_id || getEnv("SLASHML_PROJECT_ID") || null;
+        this.agentId = rawAgentId && String(rawAgentId).trim() ? String(rawAgentId).trim() : null;
+        this.callerAgentId = this.agentId;
+        this.redactPolicy = normalizeRedactPolicy(rawRedactPolicy);
+        this.redactScope =
+            rawRedactScope && String(rawRedactScope).trim()
+                ? String(rawRedactScope).trim()
+                : null;
         this.model = resolvedModel;
         this.timeoutMs = options.timeoutMs ?? exports.DEFAULT_TIMEOUT_MS;
         this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
         this.project = new ProjectManager(this);
+        this.agents = new AgentsManager(this);
+    }
+    applyLifecycleDefaults(payload, opts = {}) {
+        const effPolicy = opts.redactPolicy !== undefined
+            ? normalizeRedactPolicy(opts.redactPolicy)
+            : this.redactPolicy;
+        const effScope = opts.redactScope ?? this.redactScope;
+        const effCaller = opts.callerAgentId !== undefined && opts.callerAgentId !== null
+            ? String(opts.callerAgentId).trim()
+            : this.agentId;
+        if (payload) {
+            if (effPolicy !== null && payload.redact_policy === undefined) {
+                payload.redact_policy = effPolicy;
+            }
+            if (effScope && payload.redact_scope === undefined) {
+                payload.redact_scope = effScope;
+            }
+            if (effCaller && payload.caller_agent_id === undefined) {
+                payload.caller_agent_id = effCaller;
+            }
+        }
+        return effCaller ? { "X-SlashML-Agent-Id": effCaller } : undefined;
     }
     async request(method, path, options = {}) {
         if (!this.apiKey) {
@@ -177,7 +303,7 @@ class MemoryClient {
         const headers = {
             Accept: "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "slashml-memory-ts/1.0.11",
+            "User-Agent": "slashml-memory-ts/1.0.14",
         };
         if (this.apiKey) {
             headers.Authorization = `Bearer ${this.apiKey}`;
@@ -188,6 +314,15 @@ class MemoryClient {
         }
         if (this.projectId) {
             headers["X-SlashML-Project-Id"] = this.projectId;
+        }
+        if (this.agentId) {
+            headers["X-SlashML-Agent-Id"] = this.agentId;
+        }
+        if (options.headers) {
+            for (const [hk, hv] of Object.entries(options.headers)) {
+                if (hv)
+                    headers[hk] = hv;
+            }
         }
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -234,32 +369,192 @@ class MemoryClient {
     // ---------------------------------------------------------------------------
     async ingest(documents, options = {}) {
         const docs = typeof documents === "string" ? [documents] : Array.from(documents);
-        return this.request("POST", "/v1/memory/ingest", {
-            jsonBody: {
-                namespace: options.namespace ?? "default",
-                model: options.model ?? this.model,
-                documents: docs,
-                metadata: options.metadata ?? {},
-            },
+        const payload = {
+            namespace: options.namespace ?? "default",
+            model: options.model ?? this.model,
+            documents: docs,
+            metadata: options.metadata ?? {},
+        };
+        const headers = this.applyLifecycleDefaults(payload, {
+            redactPolicy: options.redact_policy ?? options.redactPolicy,
+            redactScope: options.redact_scope ?? options.redactScope,
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
         });
+        return this.request("POST", "/v1/memory/ingest", { jsonBody: payload, headers });
     }
     async query(prompt, options = {}) {
-        return this.request("POST", "/v1/memory/query", {
-            jsonBody: {
-                namespace: options.namespace ?? "default",
-                model: options.model ?? this.model,
-                prompt,
-                top_k: options.top_k ?? 5,
-            },
+        const payload = {
+            namespace: options.namespace ?? "default",
+            model: options.model ?? this.model,
+            prompt,
+            top_k: options.top_k ?? 5,
+        };
+        const headers = this.applyLifecycleDefaults(payload, {
+            redactPolicy: options.redact_policy ?? options.redactPolicy,
+            redactScope: options.redact_scope ?? options.redactScope,
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
         });
+        return this.request("POST", "/v1/memory/query", { jsonBody: payload, headers });
     }
     async forget(target, options = {}) {
-        return this.request("POST", "/v1/memory/forget", {
-            jsonBody: {
-                namespace: options.namespace ?? "default",
-                target,
-            },
+        if (options.purge) {
+            return this.purge(target, {
+                reason: options.reason,
+                caller_agent_id: options.caller_agent_id ?? options.callerAgentId,
+            });
+        }
+        const payload = {
+            namespace: options.namespace ?? "default",
+            target,
+        };
+        if (options.reason !== undefined) {
+            payload.reason = options.reason;
+        }
+        const headers = this.applyLifecycleDefaults(payload, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
         });
+        return this.request("POST", "/v1/memory/forget", { jsonBody: payload, headers });
+    }
+    async redact(textOrOptions, options = {}) {
+        const opts = typeof textOrOptions === "string"
+            ? { ...options, text: options.text ?? textOrOptions }
+            : { ...textOrOptions, ...options };
+        const payload = {};
+        if (opts.text !== undefined) {
+            payload.text = opts.text;
+        }
+        const memId = opts.memory_id ?? opts.memoryId;
+        if (memId) {
+            payload.memory_id = memId;
+        }
+        const explicitSpans = opts.explicit_spans ?? opts.explicitSpans;
+        if (explicitSpans !== undefined) {
+            payload.explicit_spans = explicitSpans;
+        }
+        const dryRun = opts.dry_run ?? opts.dryRun;
+        if (dryRun !== undefined) {
+            payload.dry_run = Boolean(dryRun);
+        }
+        const headers = this.applyLifecycleDefaults(payload, {
+            redactPolicy: opts.redact_policy ?? opts.redactPolicy,
+            callerAgentId: opts.caller_agent_id ?? opts.callerAgentId,
+        });
+        return this.request("POST", "/v1/memory/redact", { jsonBody: payload, headers });
+    }
+    async purge(memoryIds, options = {}) {
+        const ids = typeof memoryIds === "string" ? [memoryIds] : Array.from(memoryIds);
+        const payload = {
+            memory_ids: ids,
+        };
+        const dryRun = options.dry_run ?? options.dryRun;
+        if (dryRun !== undefined) {
+            payload.dry_run = Boolean(dryRun);
+        }
+        if (options.reason !== undefined) {
+            payload.reason = options.reason;
+        }
+        const headers = this.applyLifecycleDefaults(payload, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
+        return this.request("POST", "/v1/memory/purge", { jsonBody: payload, headers });
+    }
+    async undo(undoToken, options = {}) {
+        const payload = {
+            undo_token: undoToken,
+        };
+        const headers = this.applyLifecycleDefaults(payload, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
+        return this.request("POST", "/v1/memory/undo", { jsonBody: payload, headers });
+    }
+    async getRedactionPolicy() {
+        return this.request("GET", "/v1/memory/redact/policy");
+    }
+    async get_redaction_policy() {
+        return this.getRedactionPolicy();
+    }
+    async updateRedactionPolicy(options = {}) {
+        const payload = {};
+        const redactPolicy = options.redact_policy ?? options.redactPolicy;
+        if (redactPolicy !== undefined) {
+            payload.redact_policy = normalizeRedactPolicy(redactPolicy);
+        }
+        const redactScope = options.redact_scope ?? options.redactScope;
+        if (redactScope !== undefined) {
+            payload.redact_scope = redactScope;
+        }
+        const accessMode = options.access_mode ?? options.accessMode;
+        if (accessMode !== undefined) {
+            payload.access_mode = accessMode;
+        }
+        const allowWrite = options.allow_write ?? options.allowWrite;
+        if (allowWrite !== undefined) {
+            payload.allow_write = Boolean(allowWrite);
+        }
+        return this.request("PUT", "/v1/memory/redact/policy", { jsonBody: payload });
+    }
+    async update_redaction_policy(options = {}) {
+        return this.updateRedactionPolicy(options);
+    }
+    async previewRedaction(textOrOptions, options = {}) {
+        const opts = typeof textOrOptions === "string"
+            ? { ...options, text: options.text ?? textOrOptions }
+            : { ...textOrOptions, ...options };
+        const payload = {
+            text: opts.text ?? "",
+        };
+        const agentId = opts.agent_id ?? opts.agentId;
+        if (agentId) {
+            payload.agent_id = agentId;
+        }
+        const redactPolicy = opts.redact_policy ?? opts.redactPolicy;
+        if (redactPolicy !== undefined) {
+            payload.redact_policy = normalizeRedactPolicy(redactPolicy);
+        }
+        const redactScope = opts.redact_scope ?? opts.redactScope;
+        if (redactScope !== undefined) {
+            payload.redact_scope = redactScope;
+        }
+        return this.request("POST", "/v1/memory/redact/preview", { jsonBody: payload });
+    }
+    async preview_redaction(textOrOptions, options = {}) {
+        return this.previewRedaction(textOrOptions, options);
+    }
+    async listAgents() {
+        return this.agents.list();
+    }
+    async listAgentPolicies() {
+        return this.agents.list();
+    }
+    async list_agents() {
+        return this.agents.list();
+    }
+    async list_agent_policies() {
+        return this.agents.list();
+    }
+    async configureAgent(agentIdOrOptions, options = {}) {
+        return this.agents.configure(agentIdOrOptions, options);
+    }
+    async upsertAgentPolicy(agentIdOrOptions, options = {}) {
+        return this.agents.configure(agentIdOrOptions, options);
+    }
+    async configure_agent(agentIdOrOptions, options = {}) {
+        return this.agents.configure(agentIdOrOptions, options);
+    }
+    async upsert_agent_policy(agentIdOrOptions, options = {}) {
+        return this.agents.configure(agentIdOrOptions, options);
+    }
+    async deleteAgent(agentId) {
+        return this.agents.delete(agentId);
+    }
+    async deleteAgentPolicy(agentId) {
+        return this.agents.delete(agentId);
+    }
+    async delete_agent(agentId) {
+        return this.agents.delete(agentId);
+    }
+    async delete_agent_policy(agentId) {
+        return this.agents.delete(agentId);
     }
     async intervene(textOrPayload, options = {}) {
         const opts = typeof textOrPayload === "string"
@@ -272,28 +567,32 @@ class MemoryClient {
         const lastAssistantMsg = opts.last_assistant_message ?? opts.lastAssistantMessage ?? undefined;
         const stopHookActive = opts.stop_hook_active ?? opts.stopHookActive ?? undefined;
         const whisperedIds = opts.whispered_memory_ids ?? opts.whisperedMemoryIds ?? undefined;
-        return this.request("POST", "/v1/memory/intervene", {
-            jsonBody: {
-                hook_event_name: opts.hook_event_name ?? opts.hookEventName ?? "UserPromptSubmit",
-                prompt: opts.prompt ?? resolvedText,
-                text: resolvedText,
-                ...(lastAssistantMsg !== undefined ? { last_assistant_message: lastAssistantMsg } : {}),
-                ...(stopHookActive !== undefined ? { stop_hook_active: Boolean(stopHookActive) } : {}),
-                ...(whisperedIds && whisperedIds.length > 0 ? { whispered_memory_ids: whisperedIds } : {}),
-                tool_name: opts.tool_name ?? opts.toolName ?? null,
-                tool_input: opts.tool_input ?? opts.toolInput ?? null,
-                tool_response: opts.tool_response ?? opts.toolResponse ?? null,
-                user_id: opts.user_id ?? opts.userId ?? "default",
-                ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
-                ...(resolvedSessionId ? { session_id: resolvedSessionId } : {}),
-                model: resolvedModel,
-                commit_writes: opts.commit_writes ?? opts.commitWrites ?? true,
-                top_k: opts.top_k ?? opts.topK ?? 5,
-                client_raw_tokens_delta: opts.client_raw_tokens_delta ?? opts.clientRawTokensDelta ?? 0,
-                client_dropped_tokens_delta: opts.client_dropped_tokens_delta ?? opts.clientDroppedTokensDelta ?? 0,
-                client_dropped_events_delta: opts.client_dropped_events_delta ?? opts.clientDroppedEventsDelta ?? 0,
-            },
+        const payload = {
+            hook_event_name: opts.hook_event_name ?? opts.hookEventName ?? "UserPromptSubmit",
+            prompt: opts.prompt ?? resolvedText,
+            text: resolvedText,
+            ...(lastAssistantMsg !== undefined ? { last_assistant_message: lastAssistantMsg } : {}),
+            ...(stopHookActive !== undefined ? { stop_hook_active: Boolean(stopHookActive) } : {}),
+            ...(whisperedIds && whisperedIds.length > 0 ? { whispered_memory_ids: whisperedIds } : {}),
+            tool_name: opts.tool_name ?? opts.toolName ?? null,
+            tool_input: opts.tool_input ?? opts.toolInput ?? null,
+            tool_response: opts.tool_response ?? opts.toolResponse ?? null,
+            user_id: opts.user_id ?? opts.userId ?? "default",
+            ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
+            ...(resolvedSessionId ? { session_id: resolvedSessionId } : {}),
+            model: resolvedModel,
+            commit_writes: opts.commit_writes ?? opts.commitWrites ?? true,
+            top_k: opts.top_k ?? opts.topK ?? 5,
+            client_raw_tokens_delta: opts.client_raw_tokens_delta ?? opts.clientRawTokensDelta ?? 0,
+            client_dropped_tokens_delta: opts.client_dropped_tokens_delta ?? opts.clientDroppedTokensDelta ?? 0,
+            client_dropped_events_delta: opts.client_dropped_events_delta ?? opts.clientDroppedEventsDelta ?? 0,
+        };
+        const headers = this.applyLifecycleDefaults(payload, {
+            redactPolicy: opts.redact_policy ?? opts.redactPolicy,
+            redactScope: opts.redact_scope ?? opts.redactScope,
+            callerAgentId: opts.caller_agent_id ?? opts.callerAgentId,
         });
+        return this.request("POST", "/v1/memory/intervene", { jsonBody: payload, headers });
     }
     async status(options = {}) {
         const uid = options.user_id ?? options.userId ?? "default";
@@ -339,48 +638,76 @@ class MemoryClient {
             payload.memory_id = memId;
             payload.id = memId;
         }
-        return this.request("POST", "/v1/memories", { jsonBody: payload });
+        const headers = this.applyLifecycleDefaults(payload, {
+            redactPolicy: options.redact_policy ?? options.redactPolicy,
+            redactScope: options.redact_scope ?? options.redactScope,
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
+        return wrapResults(await this.request("POST", "/v1/memories", { jsonBody: payload, headers }));
     }
     async search(queryOrOptions, options = {}) {
         const isObj = typeof queryOrOptions === "object" && queryOrOptions !== null;
         const query = isObj ? queryOrOptions.query : queryOrOptions;
         const opts = isObj ? queryOrOptions : options;
         const effectiveLimit = opts.top_k ?? opts.topK ?? opts.limit ?? 5;
-        return this.request("POST", "/v1/memories/search", {
-            jsonBody: {
-                query,
-                user_id: opts.user_id ?? opts.userId ?? null,
-                agent_id: opts.agent_id ?? opts.agentId ?? null,
-                app_id: opts.app_id ?? opts.appId ?? null,
-                run_id: opts.run_id ?? opts.runId ?? null,
-                limit: effectiveLimit,
-                top_k: effectiveLimit,
-                filters: opts.filters ?? opts.metadata ?? null,
-                threshold: opts.threshold ?? null,
-                model: this.model,
-            },
+        const payload = {
+            query,
+            user_id: opts.user_id ?? opts.userId ?? null,
+            agent_id: opts.agent_id ?? opts.agentId ?? null,
+            app_id: opts.app_id ?? opts.appId ?? null,
+            run_id: opts.run_id ?? opts.runId ?? null,
+            limit: effectiveLimit,
+            top_k: effectiveLimit,
+            filters: opts.filters ?? opts.metadata ?? null,
+            threshold: opts.threshold ?? null,
+            model: this.model,
+        };
+        const headers = this.applyLifecycleDefaults(payload, {
+            redactPolicy: opts.redact_policy ?? opts.redactPolicy,
+            redactScope: opts.redact_scope ?? opts.redactScope,
+            callerAgentId: opts.caller_agent_id ?? opts.callerAgentId,
         });
+        return wrapResults(await this.request("POST", "/v1/memories/search", { jsonBody: payload, headers }));
     }
     async recall(queryOrOptions, options = {}) {
         return this.search(queryOrOptions, options);
     }
     async getAll(options = {}) {
-        return this.request("GET", "/v1/memories", {
+        const effPolicy = normalizeRedactPolicy(options.redact_policy ?? options.redactPolicy ?? this.redactPolicy);
+        const effScope = options.redact_scope ?? options.redactScope ?? this.redactScope;
+        const headers = this.applyLifecycleDefaults(undefined, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
+        return wrapResults(await this.request("GET", "/v1/memories", {
             params: {
                 user_id: options.user_id ?? options.userId ?? undefined,
                 agent_id: options.agent_id ?? options.agentId ?? undefined,
                 app_id: options.app_id ?? options.appId ?? undefined,
                 run_id: options.run_id ?? options.runId ?? undefined,
                 limit: options.limit ?? 100,
+                redact_policy: Array.isArray(effPolicy) ? effPolicy.join(",") : (effPolicy ?? undefined),
+                redact_scope: effScope ?? undefined,
             },
-        });
+            headers,
+        }));
     }
     async get_all(options = {}) {
         return this.getAll(options);
     }
-    async get(memoryId) {
+    async get(memoryId, options = {}) {
+        const effPolicy = normalizeRedactPolicy(options.redact_policy ?? options.redactPolicy ?? this.redactPolicy);
+        const effScope = options.redact_scope ?? options.redactScope ?? this.redactScope;
+        const headers = this.applyLifecycleDefaults(undefined, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
         try {
-            return await this.request("GET", `/v1/memories/${encodeURIComponent(memoryId)}`);
+            return await this.request("GET", `/v1/memories/${encodeURIComponent(memoryId)}`, {
+                params: {
+                    redact_policy: Array.isArray(effPolicy) ? effPolicy.join(",") : (effPolicy ?? undefined),
+                    redact_scope: effScope ?? undefined,
+                },
+                headers,
+            });
         }
         catch (err) {
             if (err instanceof SlashMLAPIError && err.statusCode === 404) {
@@ -389,18 +716,37 @@ class MemoryClient {
             throw err;
         }
     }
-    async update(memoryId, data) {
-        const body = typeof data === "string"
+    async update(memoryId, data, options = {}) {
+        const isStr = typeof data === "string";
+        const body = isStr
             ? { text: data }
             : { text: data.text ?? "", metadata: data.metadata };
+        const headers = this.applyLifecycleDefaults(body, {
+            redactPolicy: options.redact_policy ??
+                options.redactPolicy ??
+                (!isStr ? (data.redact_policy ?? data.redactPolicy) : undefined),
+            redactScope: options.redact_scope ??
+                options.redactScope ??
+                (!isStr ? (data.redact_scope ?? data.redactScope) : undefined),
+            callerAgentId: options.caller_agent_id ??
+                options.callerAgentId ??
+                (!isStr ? (data.caller_agent_id ?? data.callerAgentId) : undefined),
+        });
         return this.request("PUT", `/v1/memories/${encodeURIComponent(memoryId)}`, {
             jsonBody: body,
+            headers,
         });
     }
-    async delete(memoryId) {
-        return this.request("DELETE", `/v1/memories/${encodeURIComponent(memoryId)}`);
+    async delete(memoryId, options = {}) {
+        const headers = this.applyLifecycleDefaults(undefined, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
+        return this.request("DELETE", `/v1/memories/${encodeURIComponent(memoryId)}`, { headers });
     }
     async deleteAll(options = {}) {
+        const headers = this.applyLifecycleDefaults(undefined, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
         return this.request("DELETE", "/v1/memories", {
             params: {
                 user_id: options.user_id ?? options.userId ?? undefined,
@@ -408,6 +754,7 @@ class MemoryClient {
                 app_id: options.app_id ?? options.appId ?? undefined,
                 run_id: options.run_id ?? options.runId ?? undefined,
             },
+            headers,
         });
     }
     async delete_all(options = {}) {
@@ -429,32 +776,42 @@ class MemoryClient {
         }
         return [];
     }
-    async batchUpdate(memories) {
+    async batchUpdate(memories, options = {}) {
         const normalized = memories.map((m) => ({
             ...m,
             memory_id: m.memory_id ?? m.memoryId ?? m.id,
         }));
-        return this.request("PUT", "/v1/batch", { jsonBody: { memories: normalized } });
+        const payload = { memories: normalized };
+        const headers = this.applyLifecycleDefaults(payload, {
+            redactPolicy: options.redact_policy ?? options.redactPolicy,
+            redactScope: options.redact_scope ?? options.redactScope,
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
+        return this.request("PUT", "/v1/batch", { jsonBody: payload, headers });
     }
-    async batch_update(memories) {
-        return this.batchUpdate(memories);
+    async batch_update(memories, options = {}) {
+        return this.batchUpdate(memories, options);
     }
-    async batchDelete(memories) {
+    async batchDelete(memories, options = {}) {
         const normalized = memories.map((m) => typeof m === "string"
             ? { memory_id: m, id: m }
             : { ...m, memory_id: m.memory_id ?? m.memoryId ?? m.id });
-        return this.request("DELETE", "/v1/batch", { jsonBody: { memories: normalized } });
+        const payload = { memories: normalized };
+        const headers = this.applyLifecycleDefaults(payload, {
+            callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+        });
+        return this.request("DELETE", "/v1/batch", { jsonBody: payload, headers });
     }
-    async batch_delete(memories) {
-        return this.batchDelete(memories);
+    async batch_delete(memories, options = {}) {
+        return this.batchDelete(memories, options);
     }
     async users() {
-        return this.request("GET", "/v1/entities", {
+        return wrapResults(await this.request("GET", "/v1/entities", {
             params: {
                 org_id: this.orgId ?? undefined,
                 project_id: this.projectId ?? undefined,
             },
-        });
+        }));
     }
     async deleteUsers(options = {}) {
         return this.request("DELETE", "/v1/entities", {
@@ -498,9 +855,9 @@ class MemoryClient {
         return this.project.update(settings);
     }
     async getWebhooks(projectId) {
-        return this.request("GET", "/v1/webhooks", {
+        return wrapResults(await this.request("GET", "/v1/webhooks", {
             params: { project_id: projectId ?? this.projectId ?? undefined },
-        });
+        }));
     }
     async get_webhooks(projectId) {
         return this.getWebhooks(projectId);
@@ -561,6 +918,12 @@ class Memory extends MemoryClient {
                 configDict.host,
             orgId: configDict.org_id || configDict.orgId,
             projectId: configDict.project_id || configDict.projectId,
+            agentId: configDict.agent_id ||
+                configDict.agentId ||
+                configDict.caller_agent_id ||
+                configDict.callerAgentId,
+            redactPolicy: configDict.redact_policy || configDict.redactPolicy,
+            redactScope: configDict.redact_scope || configDict.redactScope,
             model: configDict.model,
             timeoutMs: configDict.timeoutMs,
         });

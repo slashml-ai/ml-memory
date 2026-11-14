@@ -8,6 +8,7 @@ export const {
   DEFAULT_TIMEOUT_MS,
   SlashMLAPIError,
   ProjectManager,
+  AgentsManager,
   MemoryClient,
   Memory,
   AsyncMemoryClient,

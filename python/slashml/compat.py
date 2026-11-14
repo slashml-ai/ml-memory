@@ -18,6 +18,10 @@ def _extract_config_kwargs(
     base_url: str | None = None,
     org_id: str | None = None,
     project_id: str | None = None,
+    agent_id: str | None = None,
+    caller_agent_id: str | None = None,
+    redact_policy: str | list[str] | None = None,
+    redact_scope: str | None = None,
     model: str = "slashml-nano",
     timeout_s: float = 30.0,
     transport: TransportCallable | None = None,
@@ -32,6 +36,21 @@ def _extract_config_kwargs(
             org_id = cfg.get("org_id") or cfg.get("orgId")
         if project_id is None:
             project_id = cfg.get("project_id") or cfg.get("projectId")
+        if agent_id is None:
+            agent_id = (
+                caller_agent_id
+                if caller_agent_id is not None
+                else (
+                    cfg.get("agent_id")
+                    or cfg.get("agentId")
+                    or cfg.get("caller_agent_id")
+                    or cfg.get("callerAgentId")
+                )
+            )
+        if redact_policy is None:
+            redact_policy = cfg.get("redact_policy") or cfg.get("redactPolicy")
+        if redact_scope is None:
+            redact_scope = cfg.get("redact_scope") or cfg.get("redactScope")
         if cfg.get("model"):
             model = str(cfg["model"])
         if transport is None:
@@ -42,6 +61,10 @@ def _extract_config_kwargs(
         "base_url": base_url,
         "org_id": org_id,
         "project_id": project_id,
+        "agent_id": agent_id,
+        "caller_agent_id": caller_agent_id,
+        "redact_policy": redact_policy,
+        "redact_scope": redact_scope,
         "model": model,
         "timeout_s": timeout_s,
         "transport": transport,
@@ -60,6 +83,10 @@ class Memory(MemoryClient):
         base_url: str | None = None,
         org_id: str | None = None,
         project_id: str | None = None,
+        agent_id: str | None = None,
+        caller_agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
         model: str = "slashml-nano",
         timeout_s: float = 30.0,
         transport: TransportCallable | None = None,
@@ -72,6 +99,10 @@ class Memory(MemoryClient):
             base_url=base_url,
             org_id=org_id,
             project_id=project_id,
+            agent_id=agent_id,
+            caller_agent_id=caller_agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
             model=model,
             timeout_s=timeout_s,
             transport=transport,
@@ -99,6 +130,10 @@ class AsyncMemory(AsyncMemoryClient):
         base_url: str | None = None,
         org_id: str | None = None,
         project_id: str | None = None,
+        agent_id: str | None = None,
+        caller_agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
         model: str = "slashml-nano",
         timeout_s: float = 30.0,
         transport: TransportCallable | None = None,
@@ -111,6 +146,10 @@ class AsyncMemory(AsyncMemoryClient):
             base_url=base_url,
             org_id=org_id,
             project_id=project_id,
+            agent_id=agent_id,
+            caller_agent_id=caller_agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
             model=model,
             timeout_s=timeout_s,
             transport=transport,

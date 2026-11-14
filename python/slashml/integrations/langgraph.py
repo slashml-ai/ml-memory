@@ -17,8 +17,17 @@ class SlashMLLangGraphStore:
         client: MemoryClient | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
     ) -> None:
-        self.client = client or MemoryClient(api_key=api_key, base_url=base_url)
+        self.client = client or MemoryClient(
+            api_key=api_key,
+            base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
+        )
 
     def put(self, namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> dict[str, Any]:
         ns_str = "/".join(namespace)
@@ -65,8 +74,17 @@ class SlashMLLangGraphCheckpointer:
         client: MemoryClient | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
     ) -> None:
-        self.client = client or MemoryClient(api_key=api_key, base_url=base_url)
+        self.client = client or MemoryClient(
+            api_key=api_key,
+            base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
+        )
 
     def put(self, thread_id: str, checkpoint_id: str, state: dict[str, Any]) -> dict[str, Any]:
         doc_id = f"ckpt::{thread_id}::{checkpoint_id}"

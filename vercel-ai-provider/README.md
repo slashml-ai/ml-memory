@@ -73,6 +73,24 @@ const { text, sources } = await generateText({
 });
 ```
 
+### 3. Inline Redaction & Per-Agent Scoping (`redactMemory`, `callerAgentId`, `redactPolicy`)
+
+```typescript
+import { createSlashML, redactMemory } from "@slashml/vercel-ai-provider";
+
+const masked = await redactMemory("Billing contact is alice@acme.io", {
+  slashmlApiKey: process.env.SLASHML_API_KEY,
+  redactPolicy: "gdpr",
+});
+
+const triageProvider = createSlashML({
+  slashmlApiKey: process.env.SLASHML_API_KEY,
+  callerAgentId: "support_triage_bot", // sends X-SlashML-Agent-Id
+  redactPolicy: "gdpr",
+  redactScope: "recall_only",
+});
+```
+
 ---
 
 ## License

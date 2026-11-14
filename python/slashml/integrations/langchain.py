@@ -17,9 +17,18 @@ class SlashMLChatMessageHistory:
         client: MemoryClient | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
     ) -> None:
         self.session_id = session_id
-        self.client = client or MemoryClient(api_key=api_key, base_url=base_url)
+        self.client = client or MemoryClient(
+            api_key=api_key,
+            base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
+        )
 
     def add_user_message(self, message: str) -> dict[str, Any]:
         return self.client.add(
@@ -54,8 +63,17 @@ class SlashMLLangChainRetriever:
         base_url: str | None = None,
         user_id: str = "default",
         top_k: int = 5,
+        agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
     ) -> None:
-        self.client = client or MemoryClient(api_key=api_key, base_url=base_url)
+        self.client = client or MemoryClient(
+            api_key=api_key,
+            base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
+        )
         self.user_id = user_id
         self.top_k = top_k
 
@@ -77,8 +95,17 @@ class SlashMLLangChainVectorStore:
         api_key: str | None = None,
         base_url: str | None = None,
         user_id: str = "default",
+        agent_id: str | None = None,
+        redact_policy: str | list[str] | None = None,
+        redact_scope: str | None = None,
     ) -> None:
-        self.client = client or MemoryClient(api_key=api_key, base_url=base_url)
+        self.client = client or MemoryClient(
+            api_key=api_key,
+            base_url=base_url,
+            agent_id=agent_id,
+            redact_policy=redact_policy,
+            redact_scope=redact_scope,
+        )
         self.user_id = user_id
 
     def add_texts(

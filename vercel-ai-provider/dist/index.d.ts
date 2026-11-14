@@ -12,6 +12,12 @@ export interface VercelMemoryConfig {
     userId?: string | null;
     agent_id?: string | null;
     agentId?: string | null;
+    caller_agent_id?: string | null;
+    callerAgentId?: string | null;
+    redact_policy?: string | string[] | null;
+    redactPolicy?: string | string[] | null;
+    redact_scope?: string | null;
+    redactScope?: string | null;
     app_id?: string | null;
     appId?: string | null;
     run_id?: string | null;
@@ -77,6 +83,16 @@ export declare function retrieveMemories(prompt: PromptInput, config?: VercelMem
  * Extract and store persistent memories from a Vercel AI SDK message array (`LanguageModelPrompt`).
  */
 export declare function addMemories(messages: PromptInput, config?: VercelMemoryConfig): Promise<Record<string, unknown>>;
+/**
+ * Redact sensitive spans statelessly (`text`) or in-place on a stored `memoryId` / `memory_id`.
+ */
+export declare function redactMemory(textOrOptions: string | {
+    text?: string;
+    memoryId?: string;
+    memory_id?: string;
+    redactPolicy?: string | string[];
+    redact_policy?: string | string[];
+}, config?: VercelMemoryConfig): Promise<Record<string, unknown>>;
 export declare class SlashMLAILanguageModel {
     readonly specificationVersion: "v1";
     readonly defaultObjectGenerationMode: "json";
@@ -88,6 +104,13 @@ export declare class SlashMLAILanguageModel {
     retrieveMemories(prompt: PromptInput): Promise<string>;
     getMemories(prompt?: PromptInput): Promise<Array<Record<string, unknown>>>;
     addMemories(messages: PromptInput): Promise<Record<string, unknown>>;
+    redactMemory(textOrOptions: string | {
+        text?: string;
+        memoryId?: string;
+        memory_id?: string;
+        redactPolicy?: string | string[];
+        redact_policy?: string | string[];
+    }): Promise<Record<string, unknown>>;
     private prepareCall;
     doGenerate(options?: Record<string, unknown>): Promise<{
         sources: {};

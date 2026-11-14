@@ -487,6 +487,34 @@ function createStatefulReferenceServer() {
       return;
     }
 
+    if (req.method === "POST" && pathname === "/v1/memory/redact") {
+      const rawText = String(req.body?.text || "");
+      const masked = rawText.replace(/sk_(?:live|test)_[A-Za-z0-9_]+/g, "[REDACTED:SECRET]");
+      res.end(
+        JSON.stringify({
+          status: "redacted",
+          redacted: masked !== rawText,
+          redacted_text: masked,
+          redacted_count: masked !== rawText ? 1 : 0,
+          redacted_spans: masked !== rawText ? [{ bucket: "SECRET" }] : [],
+        })
+      );
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/v1/memory/purge") {
+      const ids = Array.isArray(req.body?.memory_ids) ? req.body.memory_ids : [];
+      for (const id of ids) store.delete(id);
+      res.end(
+        JSON.stringify({
+          status: "purged",
+          purged_count: ids.length,
+          undo_token: "undo_tok_test_1",
+        })
+      );
+      return;
+    }
+
     res.end(JSON.stringify({ ok: true }));
   });
 }
@@ -597,21 +625,30 @@ test("E2E Node MCP Server (@slashml/mcp and @slashml/memory bin): all standard t
             jsonrpc: "2.0",
             id: 10,
             method: "tools/call",
-            params: { name: "forget_memory", arguments: { memory_id: "m_jwt" } },
+            params: {
+              name: "redact_memory",
+              arguments: { text: "Key is sk_test_EXAMPLE_abc12345", redact_policy: "tier1_secrets" },
+            },
           },
           {
             jsonrpc: "2.0",
             id: 11,
+            method: "tools/call",
+            params: { name: "forget_memory", arguments: { memory_id: "m_jwt" } },
+          },
+          {
+            jsonrpc: "2.0",
+            id: 12,
             method: "tools/call",
             params: { name: "nonexistent_tool", arguments: {} },
           },
         ]
       );
 
-      assert.equal(responses.length, 11);
+      assert.equal(responses.length, 12);
       assert.equal(responses[0].result.serverInfo.name, "ml-memory");
       assert.deepEqual(responses[1].result, {});
-      assert.equal(responses[2].result.tools.length, 8);
+      assert.equal(responses[2].result.tools.length, 9);
 
       const addOut = JSON.parse(responses[3].result.content[0].text);
       assert.equal(addOut.results[0].id, "m_jwt");
@@ -631,10 +668,14 @@ test("E2E Node MCP Server (@slashml/mcp and @slashml/memory bin): all standard t
       const bugOut = JSON.parse(responses[8].result.content[0].text);
       assert.ok(bugOut.results.length >= 1);
 
-      const forgetOut = JSON.parse(responses[9].result.content[0].text);
+      const redactOut = JSON.parse(responses[9].result.content[0].text);
+      assert.equal(redactOut.redacted, true);
+      assert.ok(redactOut.redacted_text.includes("[REDACTED:SECRET]"));
+
+      const forgetOut = JSON.parse(responses[10].result.content[0].text);
       assert.equal(forgetOut.deleted, true);
 
-      assert.equal(responses[10].result.isError, true);
+      assert.equal(responses[11].result.isError, true);
 
       // 2. --code-mode (execute_memory_code meta-tool)
       const codeModeRes = await runMcpSession(
@@ -1363,6 +1404,152 @@ test("Cloud Sandbox Lifecycle: sync-rules, watch-sandbox --once, MCP tools/call 
     assert.equal(forgetOut.deleted, true);
   } finally {
     fs.rmSync(tmpWorkspace, { recursive: true, force: true });
+    await mock.close();
+  }
+});
+
+test("Redaction & per-agent access control SDK methods + X-SlashML-Agent-Id header", async () => {
+  const esm = await import("../dist/index.mjs");
+  assert.equal(typeof esm.AgentsManager, "function");
+
+  let workspacePolicy = {
+    redact_policy: "soc2_coding",
+    redact_scope: "memorize_and_recall",
+    access_mode: "read_write",
+    allow_write: true,
+    supported_buckets: ["SECRET", "PCI_FINANCIAL", "PII", "PHI", "COMMERCIAL_MNPI", "LEGAL_HR", "SECURITY_EXPLOIT"],
+  };
+  const agentMap = new Map();
+
+  const mock = await createMockServer((req, res) => {
+    const callerAgent = req.headers["x-slashml-agent-id"] || req.body?.caller_agent_id || null;
+    const agentRec = callerAgent ? agentMap.get(callerAgent) : null;
+    const effectiveAccess = agentRec ? agentRec.access_mode : workspacePolicy.access_mode;
+
+    if (req.method === "POST" && req.url === "/v1/memories" && effectiveAccess === "read_only") {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: `Memory write denied for read_only agent '${callerAgent}'.` }));
+      return;
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.method === "GET" && req.url === "/v1/memory/redact/policy") {
+      res.end(JSON.stringify({ ...workspacePolicy, agents: Array.from(agentMap.values()) }));
+    } else if (req.method === "PUT" && req.url === "/v1/memory/redact/policy") {
+      workspacePolicy = { ...workspacePolicy, ...req.body };
+      res.end(JSON.stringify(workspacePolicy));
+    } else if (req.method === "POST" && req.url === "/v1/memory/redact/preview") {
+      const previewAgentRec = req.body?.agent_id ? agentMap.get(req.body.agent_id) : agentRec;
+      res.end(
+        JSON.stringify({
+          redacted: true,
+          redacted_text: String(req.body.text || "").replace(/sk_live_\w+/g, "[REDACTED:SECRET]"),
+          effective_access_mode: previewAgentRec ? previewAgentRec.access_mode : workspacePolicy.access_mode,
+        })
+      );
+    } else if (req.method === "POST" && req.url === "/v1/memory/redact") {
+      res.end(
+        JSON.stringify({
+          status: "redacted",
+          redacted: true,
+          redacted_text: "[REDACTED:SECRET]",
+          redacted_count: 1,
+        })
+      );
+    } else if (req.method === "POST" && req.url === "/v1/memory/purge") {
+      res.end(
+        JSON.stringify({
+          status: "purged",
+          purged_count: req.body.memory_ids.length,
+          undo_token: "undo_tok_99",
+        })
+      );
+    } else if (req.method === "POST" && req.url === "/v1/memory/undo") {
+      res.end(JSON.stringify({ status: "restored", restored_count: 1, undo_token: req.body.undo_token }));
+    } else if (req.method === "GET" && req.url === "/v1/agents/") {
+      res.end(JSON.stringify({ agents: Array.from(agentMap.values()) }));
+    } else if (req.method === "POST" && req.url === "/v1/agents/") {
+      const rec = {
+        agent_id: req.body.agent_id,
+        access_mode: req.body.access_mode || "read_write",
+        allow_write: (req.body.access_mode || "read_write") === "read_write",
+        redact_policy: req.body.redact_policy || workspacePolicy.redact_policy,
+        redact_scope: req.body.redact_scope || workspacePolicy.redact_scope,
+      };
+      agentMap.set(rec.agent_id, rec);
+      res.end(JSON.stringify(rec));
+    } else if (req.method === "DELETE" && req.url.startsWith("/v1/agents/")) {
+      const aid = decodeURIComponent(req.url.slice("/v1/agents/".length).replace(/\/+$/, ""));
+      agentMap.delete(aid);
+      res.end(JSON.stringify({ deleted: true, agent_id: aid }));
+    } else {
+      res.end(JSON.stringify({ ok: true }));
+    }
+  });
+
+  try {
+    const admin = new MemoryClient({
+      apiKey: "sml_admin_key",
+      baseUrl: mock.baseUrl,
+      redactPolicy: "gdpr,SECRET",
+      redactScope: "memorize_and_recall",
+    });
+    assert.deepEqual(admin.redactPolicy, ["gdpr", "SECRET"]);
+
+    const pol = await admin.getRedactionPolicy();
+    assert.equal(pol.redact_policy, "soc2_coding");
+
+    const updatedPol = await admin.update_redaction_policy({
+      redact_policy: "enterprise_strict",
+      redact_scope: "memorize_and_recall",
+      access_mode: "read_write",
+    });
+    assert.equal(updatedPol.redact_policy, "enterprise_strict");
+
+    await admin.agents.configure("support-bot", {
+      access_mode: "read_only",
+      redact_policy: ["SECRET", "PII"],
+      redact_scope: "recall_only",
+    });
+    const listed = await admin.agents.list();
+    assert.equal(listed.agents.length, 1);
+    assert.equal(listed.agents[0].agent_id, "support-bot");
+
+    const prev = await admin.previewRedaction("Token sk_live_999", { agent_id: "support-bot" });
+    assert.equal(prev.redacted, true);
+    assert.equal(prev.effective_access_mode, "read_only");
+
+    const red = await admin.redact("Token sk_live_999", { dryRun: true });
+    assert.equal(red.redacted, true);
+
+    const purged = await admin.forget("mem_to_purge", { purge: true, reason: "GDPR erasure" });
+    assert.equal(purged.status, "purged");
+    assert.equal(purged.undo_token, "undo_tok_99");
+
+    const restored = await admin.undo("undo_tok_99");
+    assert.equal(restored.status, "restored");
+
+    const readerBot = Memory.fromConfig({
+      api_key: "sml_admin_key",
+      base_url: mock.baseUrl,
+      agent_id: "support-bot",
+    });
+    assert.equal(readerBot.agentId, "support-bot");
+    await assert.rejects(
+      async () => {
+        await readerBot.add("Attempt unauthorized memory write");
+      },
+      (err) => {
+        assert.ok(err instanceof SlashMLAPIError);
+        assert.equal(err.statusCode, 403);
+        assert.match(err.message, /write denied/i);
+        return true;
+      }
+    );
+
+    const delAgent = await admin.agents.delete("support-bot");
+    assert.equal(delAgent.deleted, true);
+  } finally {
     await mock.close();
   }
 });

@@ -36,7 +36,9 @@ Whenever the user asks to **locate or diagnose a bug**, **search code by behavio
        "limit": 5,
    }
    ```
-4. **False-positive intervention dismissal (`dismiss_intervention`):**
-   If a pre-tool hook intervention was a false positive or already satisfied for the current target, call `dismiss_intervention` with the `memory_ids` and `target`.
-5. **Passive Memory Assimilation:**
+4. **Inline Redaction & Per-Agent Scoping (`redact_memory`):**
+   Use `redact_memory(text="...", redact_policy="soc2_coding")` (or `memory_id="..."` for in-place redaction) whenever scrubbing secrets, PII, PCI, PHI, or MNPI spans. When `SLASHML_AGENT_ID` is configured, read/write permissions (`read_write` vs `read_only`) and redaction clearances are enforced automatically per agent.
+5. **False-positive intervention dismissal (`dismiss_intervention`):**
+   If a pre-tool hook intervention was a false positive or already satisfied for the current target, call `dismiss_intervention` with the `memory_id` and `reason`.
+6. **Passive Memory Assimilation:**
    When ambient lifecycle hooks (`hooks.json`) are enabled, user rules, constraints, preferences, and state updates are extracted and stored automatically in the background on every turn. Only call `add_memory` if explicitly requested or when running without lifecycle hooks.

@@ -12,6 +12,7 @@ const {
   addMemories,
   getMemories,
   searchMemories,
+  redactMemory,
   normalizePromptToQuery,
   normalizeMessages,
   SlashMLAILanguageModel,
@@ -114,6 +115,22 @@ function createStatefulMockServer() {
           }
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ results: filtered.slice(0, limit) }));
+          return;
+        }
+
+        if (req.method === "POST" && parsedUrl.pathname === "/v1/memory/redact") {
+          const rawText = String(parsed?.text || "");
+          const redactedText = rawText.replace(/\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g, "[REDACTED:PII]");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              redacted: redactedText !== rawText,
+              text: redactedText,
+              redacted_text: redactedText,
+              redacted_count: redactedText !== rawText ? 1 : 0,
+              redacted_buckets: redactedText !== rawText ? ["PII"] : [],
+            }),
+          );
           return;
         }
 
@@ -468,7 +485,7 @@ test("5. High-Throughput Sequential & 200-Concurrent Load Benchmark (@slashml/ve
   }
 });
 
-test("6. CJS & ESM Export Parity", async () => {
+test("6. CJS & ESM Export Parity + Redaction & X-SlashML-Agent-Id Forwarding", async () => {
   const esm = await import("../dist/index.mjs");
   assert.equal(typeof esm.createSlashML, "function");
   assert.equal(typeof esm.createMem0, "function");
@@ -478,9 +495,46 @@ test("6. CJS & ESM Export Parity", async () => {
   assert.equal(typeof esm.addMemories, "function");
   assert.equal(typeof esm.getMemories, "function");
   assert.equal(typeof esm.searchMemories, "function");
+  assert.equal(typeof esm.redactMemory, "function");
   assert.equal(typeof esm.SlashMLAILanguageModel, "function");
   assert.equal(typeof esm.Mem0AILanguageModel, "function");
   assert.equal(esm.DEFAULT_BASE_URL, DEFAULT_BASE_URL);
   assert.equal(typeof slashml, "function");
   assert.equal(typeof mem0, "function");
+  assert.equal(typeof redactMemory, "function");
+
+  const mock = await createStatefulMockServer();
+  try {
+    const provider = createSlashML({
+      slashmlApiKey: "sml_redact_test",
+      baseUrl: mock.baseUrl,
+      userId: "u_redact",
+      callerAgentId: "support_triage_bot",
+      redactPolicy: "gdpr",
+      redactScope: "recall_only",
+    });
+    const model = provider("gpt-4o-mini");
+
+    await model.addMemories("Billing contact is alice@acme.io");
+    const addReq = mock.requests[mock.requests.length - 1];
+    assert.equal(addReq.headers["x-slashml-agent-id"], "support_triage_bot");
+    assert.equal(addReq.body.caller_agent_id, "support_triage_bot");
+    assert.equal(addReq.body.redact_policy, "gdpr");
+    assert.equal(addReq.body.redact_scope, "recall_only");
+
+    await model.retrieveMemories("Who is the billing contact?");
+    const searchReq = mock.requests[mock.requests.length - 1];
+    assert.equal(searchReq.headers["x-slashml-agent-id"], "support_triage_bot");
+    assert.equal(searchReq.body.redact_policy, "gdpr");
+    assert.equal(searchReq.body.redact_scope, "recall_only");
+
+    const redacted = await model.redactMemory("Contact alice@acme.io for billing");
+    assert.equal(redacted.redacted, true);
+    assert.equal(redacted.redacted_text, "Contact [REDACTED:PII] for billing");
+    const redactReq = mock.requests[mock.requests.length - 1];
+    assert.equal(redactReq.headers["x-slashml-agent-id"], "support_triage_bot");
+    assert.equal(redactReq.body.redact_policy, "gdpr");
+  } finally {
+    await mock.close();
+  }
 });

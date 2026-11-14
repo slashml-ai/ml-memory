@@ -8,6 +8,51 @@ export const DEFAULT_BASE_URL = "https://api.slashml.ai";
 export const DEFAULT_MODEL = "slashml-1.5-fast";
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
+export type RedactBucket =
+  | "SECRET"
+  | "PCI_FINANCIAL"
+  | "PII"
+  | "PHI"
+  | "COMMERCIAL_MNPI"
+  | "LEGAL_HR"
+  | "SECURITY_EXPLOIT";
+
+export type RedactPreset =
+  | "off"
+  | "tier1_secrets"
+  | "soc2_coding"
+  | "gdpr"
+  | "hipaa"
+  | "enterprise_strict";
+
+export type RedactPolicy = RedactPreset | RedactBucket[] | string | string[];
+export type RedactScope = "memorize_and_recall" | "recall_only";
+export type AccessMode = "read_write" | "read_only";
+
+function normalizeRedactPolicy(
+  value: RedactPolicy | null | undefined,
+): string | string[] | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    const cleaned = value.map((v) => String(v).trim()).filter(Boolean);
+    return cleaned.length > 0 ? cleaned : null;
+  }
+  const raw = String(value).trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw.includes(",")) {
+    const parts = raw
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    return parts.length > 0 ? parts : null;
+  }
+  return raw;
+}
+
 export interface MemoryClientOptions {
   apiKey?: string;
   api_key?: string;
@@ -19,6 +64,14 @@ export interface MemoryClientOptions {
   org_id?: string;
   projectId?: string;
   project_id?: string;
+  agentId?: string;
+  agent_id?: string;
+  callerAgentId?: string;
+  caller_agent_id?: string;
+  redactPolicy?: RedactPolicy;
+  redact_policy?: RedactPolicy;
+  redactScope?: RedactScope;
+  redact_scope?: RedactScope;
   model?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -35,6 +88,12 @@ export interface MemoryFilters {
   runId?: string | null;
   metadata?: Record<string, unknown> | null;
   filters?: Record<string, unknown> | null;
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  redact_scope?: RedactScope;
+  redactScope?: RedactScope;
+  caller_agent_id?: string | null;
+  callerAgentId?: string | null;
 }
 
 export interface AddMemoryOptions extends MemoryFilters {
@@ -54,16 +113,99 @@ export interface IngestOptions {
   namespace?: string;
   model?: string;
   metadata?: Record<string, unknown>;
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  redact_scope?: RedactScope;
+  redactScope?: RedactScope;
+  caller_agent_id?: string;
+  callerAgentId?: string;
 }
 
 export interface QueryOptions {
   namespace?: string;
   model?: string;
   top_k?: number;
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  redact_scope?: RedactScope;
+  redactScope?: RedactScope;
+  caller_agent_id?: string;
+  callerAgentId?: string;
 }
 
 export interface ForgetOptions {
   namespace?: string;
+  purge?: boolean;
+  reason?: string;
+  caller_agent_id?: string;
+  callerAgentId?: string;
+}
+
+export interface RedactOptions {
+  text?: string;
+  memory_id?: string;
+  memoryId?: string;
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  explicit_spans?: Array<Record<string, unknown>>;
+  explicitSpans?: Array<Record<string, unknown>>;
+  dry_run?: boolean;
+  dryRun?: boolean;
+  caller_agent_id?: string;
+  callerAgentId?: string;
+}
+
+export interface PurgeOptions {
+  dry_run?: boolean;
+  dryRun?: boolean;
+  reason?: string;
+  caller_agent_id?: string;
+  callerAgentId?: string;
+}
+
+export interface UndoOptions {
+  caller_agent_id?: string;
+  callerAgentId?: string;
+}
+
+export interface UpdateRedactionPolicyOptions {
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  redact_scope?: RedactScope;
+  redactScope?: RedactScope;
+  access_mode?: AccessMode;
+  accessMode?: AccessMode;
+  allow_write?: boolean;
+  allowWrite?: boolean;
+}
+
+export interface PreviewRedactionOptions {
+  text?: string;
+  agent_id?: string;
+  agentId?: string;
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  redact_scope?: RedactScope;
+  redactScope?: RedactScope;
+}
+
+export interface ConfigureAgentOptions {
+  agent_id?: string;
+  agentId?: string;
+  name?: string | null;
+  access_mode?: AccessMode;
+  accessMode?: AccessMode;
+  allow_write?: boolean;
+  allowWrite?: boolean;
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  redact_scope?: RedactScope;
+  redactScope?: RedactScope;
+  inherit_policy?: boolean;
+  inheritPolicy?: boolean;
+  inherit_access?: boolean;
+  inheritAccess?: boolean;
+  metadata?: Record<string, unknown>;
 }
 
 export interface InterveneOptions {
@@ -94,6 +236,12 @@ export interface InterveneOptions {
   commitWrites?: boolean;
   top_k?: number;
   topK?: number;
+  redact_policy?: RedactPolicy;
+  redactPolicy?: RedactPolicy;
+  redact_scope?: RedactScope;
+  redactScope?: RedactScope;
+  caller_agent_id?: string | null;
+  callerAgentId?: string | null;
   client_raw_tokens_delta?: number;
   clientRawTokensDelta?: number;
   client_dropped_tokens_delta?: number;
@@ -115,12 +263,14 @@ export interface StatusOptions {
 
 export class SlashMLAPIError extends Error {
   public readonly statusCode: number;
+  public readonly status: number;
   public readonly details: Record<string, unknown>;
 
   constructor(statusCode: number, message: string, details: Record<string, unknown> = {}) {
     super(`SlashMLAPIError (${statusCode}): ${message}`);
     this.name = "SlashMLAPIError";
     this.statusCode = statusCode;
+    this.status = statusCode;
     this.details = details;
   }
 }
@@ -131,6 +281,13 @@ function getEnv(name: string): string | undefined {
     return g.process.env[name];
   }
   return undefined;
+}
+
+function wrapResults(res: unknown): Record<string, unknown> {
+  if (Array.isArray(res)) {
+    return { results: res };
+  }
+  return (res as Record<string, unknown>) ?? {};
 }
 
 export class ProjectManager {
@@ -258,14 +415,75 @@ export class ProjectManager {
   }
 }
 
+export class AgentsManager {
+  private readonly client: MemoryClient;
+
+  constructor(client: MemoryClient) {
+    this.client = client;
+  }
+
+  public async list(): Promise<Record<string, unknown>> {
+    const res = await this.client.request<unknown>("GET", "/v1/agents/");
+    return Array.isArray(res) ? { agents: res } : ((res as Record<string, unknown>) ?? {});
+  }
+
+  public async configure(
+    agentIdOrOptions: string | ConfigureAgentOptions,
+    options: ConfigureAgentOptions = {},
+  ): Promise<Record<string, unknown>> {
+    const isObj = typeof agentIdOrOptions === "object" && agentIdOrOptions !== null;
+    const opts: ConfigureAgentOptions = isObj ? agentIdOrOptions : options;
+    const resolvedAgentId = isObj
+      ? (opts.agent_id ?? opts.agentId ?? "")
+      : agentIdOrOptions;
+    const payload: Record<string, unknown> = {
+      agent_id: String(resolvedAgentId).trim(),
+    };
+    if (opts.name !== undefined) payload.name = opts.name;
+    const accessMode = opts.access_mode ?? opts.accessMode;
+    if (accessMode !== undefined) payload.access_mode = accessMode;
+    const allowWrite = opts.allow_write ?? opts.allowWrite;
+    if (allowWrite !== undefined) payload.allow_write = Boolean(allowWrite);
+    const redactPolicy = opts.redact_policy ?? opts.redactPolicy;
+    if (redactPolicy !== undefined) {
+      payload.redact_policy = normalizeRedactPolicy(redactPolicy);
+    }
+    const redactScope = opts.redact_scope ?? opts.redactScope;
+    if (redactScope !== undefined) payload.redact_scope = redactScope;
+    if (opts.inherit_policy ?? opts.inheritPolicy) payload.inherit_policy = true;
+    if (opts.inherit_access ?? opts.inheritAccess) payload.inherit_access = true;
+    if (opts.metadata !== undefined) payload.metadata = opts.metadata;
+    return this.client.request("POST", "/v1/agents/", { jsonBody: payload });
+  }
+
+  public async upsert(
+    agentIdOrOptions: string | ConfigureAgentOptions,
+    options: ConfigureAgentOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return this.configure(agentIdOrOptions, options);
+  }
+
+  public async delete(agentId: string): Promise<Record<string, unknown>> {
+    return this.client.request(
+      "DELETE",
+      `/v1/agents/${encodeURIComponent(String(agentId).trim())}/`,
+    );
+  }
+}
+
 export class MemoryClient {
   public readonly apiKey: string;
   public readonly baseUrl: string;
   public readonly orgId: string | null;
   public readonly projectId: string | null;
+  public readonly agentId: string | null;
+  public readonly callerAgentId: string | null;
+  public readonly redactPolicy: string | string[] | null;
+  public readonly redactScope: RedactScope | null;
   public readonly model: string;
   public readonly timeoutMs: number;
   public readonly project: ProjectManager;
+  public readonly agents: AgentsManager;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: MemoryClientOptions = {}) {
@@ -287,15 +505,71 @@ export class MemoryClient {
       options.model ||
       getEnv("SLASHML_MODEL") ||
       DEFAULT_MODEL;
+    const rawAgentId =
+      options.agentId ??
+      options.agent_id ??
+      options.callerAgentId ??
+      options.caller_agent_id ??
+      getEnv("SLASHML_AGENT_ID") ??
+      null;
+    const rawRedactPolicy =
+      options.redactPolicy ??
+      options.redact_policy ??
+      getEnv("SLASHML_REDACT_POLICY") ??
+      null;
+    const rawRedactScope =
+      options.redactScope ??
+      options.redact_scope ??
+      (getEnv("SLASHML_REDACT_SCOPE") as RedactScope | undefined) ??
+      null;
 
     this.apiKey = resolvedKey;
     this.baseUrl = resolvedUrl.replace(/\/+$/, "");
     this.orgId = options.orgId || options.org_id || getEnv("SLASHML_ORG_ID") || null;
     this.projectId = options.projectId || options.project_id || getEnv("SLASHML_PROJECT_ID") || null;
+    this.agentId = rawAgentId && String(rawAgentId).trim() ? String(rawAgentId).trim() : null;
+    this.callerAgentId = this.agentId;
+    this.redactPolicy = normalizeRedactPolicy(rawRedactPolicy);
+    this.redactScope =
+      rawRedactScope && String(rawRedactScope).trim()
+        ? (String(rawRedactScope).trim() as RedactScope)
+        : null;
     this.model = resolvedModel;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.project = new ProjectManager(this);
+    this.agents = new AgentsManager(this);
+  }
+
+  private applyLifecycleDefaults(
+    payload?: Record<string, unknown>,
+    opts: {
+      redactPolicy?: RedactPolicy;
+      redactScope?: RedactScope;
+      callerAgentId?: string | null;
+    } = {},
+  ): Record<string, string> | undefined {
+    const effPolicy =
+      opts.redactPolicy !== undefined
+        ? normalizeRedactPolicy(opts.redactPolicy)
+        : this.redactPolicy;
+    const effScope = opts.redactScope ?? this.redactScope;
+    const effCaller =
+      opts.callerAgentId !== undefined && opts.callerAgentId !== null
+        ? String(opts.callerAgentId).trim()
+        : this.agentId;
+    if (payload) {
+      if (effPolicy !== null && payload.redact_policy === undefined) {
+        payload.redact_policy = effPolicy;
+      }
+      if (effScope && payload.redact_scope === undefined) {
+        payload.redact_scope = effScope;
+      }
+      if (effCaller && payload.caller_agent_id === undefined) {
+        payload.caller_agent_id = effCaller;
+      }
+    }
+    return effCaller ? { "X-SlashML-Agent-Id": effCaller } : undefined;
   }
 
   public async request<T = Record<string, unknown>>(
@@ -304,6 +578,7 @@ export class MemoryClient {
     options: {
       params?: Record<string, unknown>;
       jsonBody?: Record<string, unknown>;
+      headers?: Record<string, string>;
     } = {},
   ): Promise<T> {
     if (!this.apiKey) {
@@ -330,7 +605,7 @@ export class MemoryClient {
     const headers: Record<string, string> = {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "User-Agent": "slashml-memory-ts/1.0.11",
+      "User-Agent": "slashml-memory-ts/1.0.14",
     };
     if (this.apiKey) {
       headers.Authorization = `Bearer ${this.apiKey}`;
@@ -341,6 +616,14 @@ export class MemoryClient {
     }
     if (this.projectId) {
       headers["X-SlashML-Project-Id"] = this.projectId;
+    }
+    if (this.agentId) {
+      headers["X-SlashML-Agent-Id"] = this.agentId;
+    }
+    if (options.headers) {
+      for (const [hk, hv] of Object.entries(options.headers)) {
+        if (hv) headers[hk] = hv;
+      }
     }
 
     const controller = new AbortController();
@@ -395,40 +678,254 @@ export class MemoryClient {
     options: IngestOptions = {},
   ): Promise<Record<string, unknown>> {
     const docs = typeof documents === "string" ? [documents] : Array.from(documents);
-    return this.request("POST", "/v1/memory/ingest", {
-      jsonBody: {
-        namespace: options.namespace ?? "default",
-        model: options.model ?? this.model,
-        documents: docs,
-        metadata: options.metadata ?? {},
-      },
+    const payload: Record<string, unknown> = {
+      namespace: options.namespace ?? "default",
+      model: options.model ?? this.model,
+      documents: docs,
+      metadata: options.metadata ?? {},
+    };
+    const headers = this.applyLifecycleDefaults(payload, {
+      redactPolicy: options.redact_policy ?? options.redactPolicy,
+      redactScope: options.redact_scope ?? options.redactScope,
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
     });
+    return this.request("POST", "/v1/memory/ingest", { jsonBody: payload, headers });
   }
 
   public async query(
     prompt: string,
     options: QueryOptions = {},
   ): Promise<Record<string, unknown>> {
-    return this.request("POST", "/v1/memory/query", {
-      jsonBody: {
-        namespace: options.namespace ?? "default",
-        model: options.model ?? this.model,
-        prompt,
-        top_k: options.top_k ?? 5,
-      },
+    const payload: Record<string, unknown> = {
+      namespace: options.namespace ?? "default",
+      model: options.model ?? this.model,
+      prompt,
+      top_k: options.top_k ?? 5,
+    };
+    const headers = this.applyLifecycleDefaults(payload, {
+      redactPolicy: options.redact_policy ?? options.redactPolicy,
+      redactScope: options.redact_scope ?? options.redactScope,
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
     });
+    return this.request("POST", "/v1/memory/query", { jsonBody: payload, headers });
   }
 
   public async forget(
     target: string,
     options: ForgetOptions = {},
   ): Promise<Record<string, unknown>> {
-    return this.request("POST", "/v1/memory/forget", {
-      jsonBody: {
-        namespace: options.namespace ?? "default",
-        target,
-      },
+    if (options.purge) {
+      return this.purge(target, {
+        reason: options.reason,
+        caller_agent_id: options.caller_agent_id ?? options.callerAgentId,
+      });
+    }
+    const payload: Record<string, unknown> = {
+      namespace: options.namespace ?? "default",
+      target,
+    };
+    if (options.reason !== undefined) {
+      payload.reason = options.reason;
+    }
+    const headers = this.applyLifecycleDefaults(payload, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
     });
+    return this.request("POST", "/v1/memory/forget", { jsonBody: payload, headers });
+  }
+
+  public async redact(
+    textOrOptions: string | RedactOptions,
+    options: RedactOptions = {},
+  ): Promise<Record<string, unknown>> {
+    const opts: RedactOptions =
+      typeof textOrOptions === "string"
+        ? { ...options, text: options.text ?? textOrOptions }
+        : { ...textOrOptions, ...options };
+    const payload: Record<string, unknown> = {};
+    if (opts.text !== undefined) {
+      payload.text = opts.text;
+    }
+    const memId = opts.memory_id ?? opts.memoryId;
+    if (memId) {
+      payload.memory_id = memId;
+    }
+    const explicitSpans = opts.explicit_spans ?? opts.explicitSpans;
+    if (explicitSpans !== undefined) {
+      payload.explicit_spans = explicitSpans;
+    }
+    const dryRun = opts.dry_run ?? opts.dryRun;
+    if (dryRun !== undefined) {
+      payload.dry_run = Boolean(dryRun);
+    }
+    const headers = this.applyLifecycleDefaults(payload, {
+      redactPolicy: opts.redact_policy ?? opts.redactPolicy,
+      callerAgentId: opts.caller_agent_id ?? opts.callerAgentId,
+    });
+    return this.request("POST", "/v1/memory/redact", { jsonBody: payload, headers });
+  }
+
+  public async purge(
+    memoryIds: string | string[],
+    options: PurgeOptions = {},
+  ): Promise<Record<string, unknown>> {
+    const ids = typeof memoryIds === "string" ? [memoryIds] : Array.from(memoryIds);
+    const payload: Record<string, unknown> = {
+      memory_ids: ids,
+    };
+    const dryRun = options.dry_run ?? options.dryRun;
+    if (dryRun !== undefined) {
+      payload.dry_run = Boolean(dryRun);
+    }
+    if (options.reason !== undefined) {
+      payload.reason = options.reason;
+    }
+    const headers = this.applyLifecycleDefaults(payload, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
+    return this.request("POST", "/v1/memory/purge", { jsonBody: payload, headers });
+  }
+
+  public async undo(
+    undoToken: string,
+    options: UndoOptions = {},
+  ): Promise<Record<string, unknown>> {
+    const payload: Record<string, unknown> = {
+      undo_token: undoToken,
+    };
+    const headers = this.applyLifecycleDefaults(payload, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
+    return this.request("POST", "/v1/memory/undo", { jsonBody: payload, headers });
+  }
+
+  public async getRedactionPolicy(): Promise<Record<string, unknown>> {
+    return this.request("GET", "/v1/memory/redact/policy");
+  }
+
+  public async get_redaction_policy(): Promise<Record<string, unknown>> {
+    return this.getRedactionPolicy();
+  }
+
+  public async updateRedactionPolicy(
+    options: UpdateRedactionPolicyOptions = {},
+  ): Promise<Record<string, unknown>> {
+    const payload: Record<string, unknown> = {};
+    const redactPolicy = options.redact_policy ?? options.redactPolicy;
+    if (redactPolicy !== undefined) {
+      payload.redact_policy = normalizeRedactPolicy(redactPolicy);
+    }
+    const redactScope = options.redact_scope ?? options.redactScope;
+    if (redactScope !== undefined) {
+      payload.redact_scope = redactScope;
+    }
+    const accessMode = options.access_mode ?? options.accessMode;
+    if (accessMode !== undefined) {
+      payload.access_mode = accessMode;
+    }
+    const allowWrite = options.allow_write ?? options.allowWrite;
+    if (allowWrite !== undefined) {
+      payload.allow_write = Boolean(allowWrite);
+    }
+    return this.request("PUT", "/v1/memory/redact/policy", { jsonBody: payload });
+  }
+
+  public async update_redaction_policy(
+    options: UpdateRedactionPolicyOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return this.updateRedactionPolicy(options);
+  }
+
+  public async previewRedaction(
+    textOrOptions: string | PreviewRedactionOptions,
+    options: PreviewRedactionOptions = {},
+  ): Promise<Record<string, unknown>> {
+    const opts: PreviewRedactionOptions =
+      typeof textOrOptions === "string"
+        ? { ...options, text: options.text ?? textOrOptions }
+        : { ...textOrOptions, ...options };
+    const payload: Record<string, unknown> = {
+      text: opts.text ?? "",
+    };
+    const agentId = opts.agent_id ?? opts.agentId;
+    if (agentId) {
+      payload.agent_id = agentId;
+    }
+    const redactPolicy = opts.redact_policy ?? opts.redactPolicy;
+    if (redactPolicy !== undefined) {
+      payload.redact_policy = normalizeRedactPolicy(redactPolicy);
+    }
+    const redactScope = opts.redact_scope ?? opts.redactScope;
+    if (redactScope !== undefined) {
+      payload.redact_scope = redactScope;
+    }
+    return this.request("POST", "/v1/memory/redact/preview", { jsonBody: payload });
+  }
+
+  public async preview_redaction(
+    textOrOptions: string | PreviewRedactionOptions,
+    options: PreviewRedactionOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return this.previewRedaction(textOrOptions, options);
+  }
+
+  public async listAgents(): Promise<Record<string, unknown>> {
+    return this.agents.list();
+  }
+
+  public async listAgentPolicies(): Promise<Record<string, unknown>> {
+    return this.agents.list();
+  }
+
+  public async list_agents(): Promise<Record<string, unknown>> {
+    return this.agents.list();
+  }
+
+  public async list_agent_policies(): Promise<Record<string, unknown>> {
+    return this.agents.list();
+  }
+
+  public async configureAgent(
+    agentIdOrOptions: string | ConfigureAgentOptions,
+    options: ConfigureAgentOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return this.agents.configure(agentIdOrOptions, options);
+  }
+
+  public async upsertAgentPolicy(
+    agentIdOrOptions: string | ConfigureAgentOptions,
+    options: ConfigureAgentOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return this.agents.configure(agentIdOrOptions, options);
+  }
+
+  public async configure_agent(
+    agentIdOrOptions: string | ConfigureAgentOptions,
+    options: ConfigureAgentOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return this.agents.configure(agentIdOrOptions, options);
+  }
+
+  public async upsert_agent_policy(
+    agentIdOrOptions: string | ConfigureAgentOptions,
+    options: ConfigureAgentOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return this.agents.configure(agentIdOrOptions, options);
+  }
+
+  public async deleteAgent(agentId: string): Promise<Record<string, unknown>> {
+    return this.agents.delete(agentId);
+  }
+
+  public async deleteAgentPolicy(agentId: string): Promise<Record<string, unknown>> {
+    return this.agents.delete(agentId);
+  }
+
+  public async delete_agent(agentId: string): Promise<Record<string, unknown>> {
+    return this.agents.delete(agentId);
+  }
+
+  public async delete_agent_policy(agentId: string): Promise<Record<string, unknown>> {
+    return this.agents.delete(agentId);
   }
 
   public async intervene(
@@ -449,30 +946,34 @@ export class MemoryClient {
       opts.stop_hook_active ?? opts.stopHookActive ?? undefined;
     const whisperedIds =
       opts.whispered_memory_ids ?? opts.whisperedMemoryIds ?? undefined;
-    return this.request("POST", "/v1/memory/intervene", {
-      jsonBody: {
-        hook_event_name: opts.hook_event_name ?? opts.hookEventName ?? "UserPromptSubmit",
-        prompt: opts.prompt ?? resolvedText,
-        text: resolvedText,
-        ...(lastAssistantMsg !== undefined ? { last_assistant_message: lastAssistantMsg } : {}),
-        ...(stopHookActive !== undefined ? { stop_hook_active: Boolean(stopHookActive) } : {}),
-        ...(whisperedIds && whisperedIds.length > 0 ? { whispered_memory_ids: whisperedIds } : {}),
-        tool_name: opts.tool_name ?? opts.toolName ?? null,
-        tool_input: opts.tool_input ?? opts.toolInput ?? null,
-        tool_response: opts.tool_response ?? opts.toolResponse ?? null,
-        user_id: opts.user_id ?? opts.userId ?? "default",
-        ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
-        ...(resolvedSessionId ? { session_id: resolvedSessionId } : {}),
-        model: resolvedModel,
-        commit_writes: opts.commit_writes ?? opts.commitWrites ?? true,
-        top_k: opts.top_k ?? opts.topK ?? 5,
-        client_raw_tokens_delta: opts.client_raw_tokens_delta ?? opts.clientRawTokensDelta ?? 0,
-        client_dropped_tokens_delta:
-          opts.client_dropped_tokens_delta ?? opts.clientDroppedTokensDelta ?? 0,
-        client_dropped_events_delta:
-          opts.client_dropped_events_delta ?? opts.clientDroppedEventsDelta ?? 0,
-      },
+    const payload: Record<string, unknown> = {
+      hook_event_name: opts.hook_event_name ?? opts.hookEventName ?? "UserPromptSubmit",
+      prompt: opts.prompt ?? resolvedText,
+      text: resolvedText,
+      ...(lastAssistantMsg !== undefined ? { last_assistant_message: lastAssistantMsg } : {}),
+      ...(stopHookActive !== undefined ? { stop_hook_active: Boolean(stopHookActive) } : {}),
+      ...(whisperedIds && whisperedIds.length > 0 ? { whispered_memory_ids: whisperedIds } : {}),
+      tool_name: opts.tool_name ?? opts.toolName ?? null,
+      tool_input: opts.tool_input ?? opts.toolInput ?? null,
+      tool_response: opts.tool_response ?? opts.toolResponse ?? null,
+      user_id: opts.user_id ?? opts.userId ?? "default",
+      ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
+      ...(resolvedSessionId ? { session_id: resolvedSessionId } : {}),
+      model: resolvedModel,
+      commit_writes: opts.commit_writes ?? opts.commitWrites ?? true,
+      top_k: opts.top_k ?? opts.topK ?? 5,
+      client_raw_tokens_delta: opts.client_raw_tokens_delta ?? opts.clientRawTokensDelta ?? 0,
+      client_dropped_tokens_delta:
+        opts.client_dropped_tokens_delta ?? opts.clientDroppedTokensDelta ?? 0,
+      client_dropped_events_delta:
+        opts.client_dropped_events_delta ?? opts.clientDroppedEventsDelta ?? 0,
+    };
+    const headers = this.applyLifecycleDefaults(payload, {
+      redactPolicy: opts.redact_policy ?? opts.redactPolicy,
+      redactScope: opts.redact_scope ?? opts.redactScope,
+      callerAgentId: opts.caller_agent_id ?? opts.callerAgentId,
     });
+    return this.request("POST", "/v1/memory/intervene", { jsonBody: payload, headers });
   }
 
   public async status(options: StatusOptions = {}): Promise<Record<string, unknown>> {
@@ -527,7 +1028,14 @@ export class MemoryClient {
       payload.memory_id = memId;
       payload.id = memId;
     }
-    return this.request("POST", "/v1/memories", { jsonBody: payload });
+    const headers = this.applyLifecycleDefaults(payload, {
+      redactPolicy: options.redact_policy ?? options.redactPolicy,
+      redactScope: options.redact_scope ?? options.redactScope,
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
+    return wrapResults(
+      await this.request<unknown>("POST", "/v1/memories", { jsonBody: payload, headers }),
+    );
   }
 
   public async search(
@@ -538,20 +1046,26 @@ export class MemoryClient {
     const query = isObj ? queryOrOptions.query : queryOrOptions;
     const opts: SearchMemoryOptions = isObj ? queryOrOptions : options;
     const effectiveLimit = opts.top_k ?? opts.topK ?? opts.limit ?? 5;
-    return this.request("POST", "/v1/memories/search", {
-      jsonBody: {
-        query,
-        user_id: opts.user_id ?? opts.userId ?? null,
-        agent_id: opts.agent_id ?? opts.agentId ?? null,
-        app_id: opts.app_id ?? opts.appId ?? null,
-        run_id: opts.run_id ?? opts.runId ?? null,
-        limit: effectiveLimit,
-        top_k: effectiveLimit,
-        filters: opts.filters ?? opts.metadata ?? null,
-        threshold: opts.threshold ?? null,
-        model: this.model,
-      },
+    const payload: Record<string, unknown> = {
+      query,
+      user_id: opts.user_id ?? opts.userId ?? null,
+      agent_id: opts.agent_id ?? opts.agentId ?? null,
+      app_id: opts.app_id ?? opts.appId ?? null,
+      run_id: opts.run_id ?? opts.runId ?? null,
+      limit: effectiveLimit,
+      top_k: effectiveLimit,
+      filters: opts.filters ?? opts.metadata ?? null,
+      threshold: opts.threshold ?? null,
+      model: this.model,
+    };
+    const headers = this.applyLifecycleDefaults(payload, {
+      redactPolicy: opts.redact_policy ?? opts.redactPolicy,
+      redactScope: opts.redact_scope ?? opts.redactScope,
+      callerAgentId: opts.caller_agent_id ?? opts.callerAgentId,
     });
+    return wrapResults(
+      await this.request<unknown>("POST", "/v1/memories/search", { jsonBody: payload, headers }),
+    );
   }
 
   public async recall(
@@ -564,15 +1078,27 @@ export class MemoryClient {
   public async getAll(
     options: MemoryFilters & { limit?: number } = {},
   ): Promise<Record<string, unknown>> {
-    return this.request("GET", "/v1/memories", {
-      params: {
-        user_id: options.user_id ?? options.userId ?? undefined,
-        agent_id: options.agent_id ?? options.agentId ?? undefined,
-        app_id: options.app_id ?? options.appId ?? undefined,
-        run_id: options.run_id ?? options.runId ?? undefined,
-        limit: options.limit ?? 100,
-      },
+    const effPolicy = normalizeRedactPolicy(
+      options.redact_policy ?? options.redactPolicy ?? this.redactPolicy,
+    );
+    const effScope = options.redact_scope ?? options.redactScope ?? this.redactScope;
+    const headers = this.applyLifecycleDefaults(undefined, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
     });
+    return wrapResults(
+      await this.request<unknown>("GET", "/v1/memories", {
+        params: {
+          user_id: options.user_id ?? options.userId ?? undefined,
+          agent_id: options.agent_id ?? options.agentId ?? undefined,
+          app_id: options.app_id ?? options.appId ?? undefined,
+          run_id: options.run_id ?? options.runId ?? undefined,
+          limit: options.limit ?? 100,
+          redact_policy: Array.isArray(effPolicy) ? effPolicy.join(",") : (effPolicy ?? undefined),
+          redact_scope: effScope ?? undefined,
+        },
+        headers,
+      }),
+    );
   }
 
   public async get_all(
@@ -581,9 +1107,32 @@ export class MemoryClient {
     return this.getAll(options);
   }
 
-  public async get(memoryId: string): Promise<Record<string, unknown> | null> {
+  public async get(
+    memoryId: string,
+    options: {
+      redact_policy?: RedactPolicy;
+      redactPolicy?: RedactPolicy;
+      redact_scope?: RedactScope;
+      redactScope?: RedactScope;
+      caller_agent_id?: string;
+      callerAgentId?: string;
+    } = {},
+  ): Promise<Record<string, unknown> | null> {
+    const effPolicy = normalizeRedactPolicy(
+      options.redact_policy ?? options.redactPolicy ?? this.redactPolicy,
+    );
+    const effScope = options.redact_scope ?? options.redactScope ?? this.redactScope;
+    const headers = this.applyLifecycleDefaults(undefined, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
     try {
-      return await this.request("GET", `/v1/memories/${encodeURIComponent(memoryId)}`);
+      return await this.request("GET", `/v1/memories/${encodeURIComponent(memoryId)}`, {
+        params: {
+          redact_policy: Array.isArray(effPolicy) ? effPolicy.join(",") : (effPolicy ?? undefined),
+          redact_scope: effScope ?? undefined,
+        },
+        headers,
+      });
     } catch (err) {
       if (err instanceof SlashMLAPIError && err.statusCode === 404) {
         return null;
@@ -594,22 +1143,65 @@ export class MemoryClient {
 
   public async update(
     memoryId: string,
-    data: string | { text?: string; metadata?: Record<string, unknown> },
+    data:
+      | string
+      | {
+          text?: string;
+          metadata?: Record<string, unknown>;
+          redact_policy?: RedactPolicy;
+          redactPolicy?: RedactPolicy;
+          redact_scope?: RedactScope;
+          redactScope?: RedactScope;
+          caller_agent_id?: string;
+          callerAgentId?: string;
+        },
+    options: {
+      redact_policy?: RedactPolicy;
+      redactPolicy?: RedactPolicy;
+      redact_scope?: RedactScope;
+      redactScope?: RedactScope;
+      caller_agent_id?: string;
+      callerAgentId?: string;
+    } = {},
   ): Promise<Record<string, unknown>> {
-    const body =
-      typeof data === "string"
-        ? { text: data }
-        : { text: data.text ?? "", metadata: data.metadata };
+    const isStr = typeof data === "string";
+    const body: Record<string, unknown> = isStr
+      ? { text: data }
+      : { text: data.text ?? "", metadata: data.metadata };
+    const headers = this.applyLifecycleDefaults(body, {
+      redactPolicy:
+        options.redact_policy ??
+        options.redactPolicy ??
+        (!isStr ? (data.redact_policy ?? data.redactPolicy) : undefined),
+      redactScope:
+        options.redact_scope ??
+        options.redactScope ??
+        (!isStr ? (data.redact_scope ?? data.redactScope) : undefined),
+      callerAgentId:
+        options.caller_agent_id ??
+        options.callerAgentId ??
+        (!isStr ? (data.caller_agent_id ?? data.callerAgentId) : undefined),
+    });
     return this.request("PUT", `/v1/memories/${encodeURIComponent(memoryId)}`, {
       jsonBody: body,
+      headers,
     });
   }
 
-  public async delete(memoryId: string): Promise<Record<string, unknown>> {
-    return this.request("DELETE", `/v1/memories/${encodeURIComponent(memoryId)}`);
+  public async delete(
+    memoryId: string,
+    options: { caller_agent_id?: string; callerAgentId?: string } = {},
+  ): Promise<Record<string, unknown>> {
+    const headers = this.applyLifecycleDefaults(undefined, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
+    return this.request("DELETE", `/v1/memories/${encodeURIComponent(memoryId)}`, { headers });
   }
 
   public async deleteAll(options: MemoryFilters = {}): Promise<Record<string, unknown>> {
+    const headers = this.applyLifecycleDefaults(undefined, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
     return this.request("DELETE", "/v1/memories", {
       params: {
         user_id: options.user_id ?? options.userId ?? undefined,
@@ -617,6 +1209,7 @@ export class MemoryClient {
         app_id: options.app_id ?? options.appId ?? undefined,
         run_id: options.run_id ?? options.runId ?? undefined,
       },
+      headers,
     });
   }
 
@@ -645,42 +1238,76 @@ export class MemoryClient {
     return [];
   }
 
-  public async batchUpdate(memories: Array<Record<string, unknown>>): Promise<Record<string, unknown>> {
+  public async batchUpdate(
+    memories: Array<Record<string, unknown>>,
+    options: {
+      redact_policy?: RedactPolicy;
+      redactPolicy?: RedactPolicy;
+      redact_scope?: RedactScope;
+      redactScope?: RedactScope;
+      caller_agent_id?: string;
+      callerAgentId?: string;
+    } = {},
+  ): Promise<Record<string, unknown>> {
     const normalized = memories.map((m) => ({
       ...m,
       memory_id: m.memory_id ?? m.memoryId ?? m.id,
     }));
-    return this.request("PUT", "/v1/batch", { jsonBody: { memories: normalized } });
+    const payload: Record<string, unknown> = { memories: normalized };
+    const headers = this.applyLifecycleDefaults(payload, {
+      redactPolicy: options.redact_policy ?? options.redactPolicy,
+      redactScope: options.redact_scope ?? options.redactScope,
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
+    return this.request("PUT", "/v1/batch", { jsonBody: payload, headers });
   }
 
-  public async batch_update(memories: Array<Record<string, unknown>>): Promise<Record<string, unknown>> {
-    return this.batchUpdate(memories);
+  public async batch_update(
+    memories: Array<Record<string, unknown>>,
+    options: {
+      redact_policy?: RedactPolicy;
+      redactPolicy?: RedactPolicy;
+      redact_scope?: RedactScope;
+      redactScope?: RedactScope;
+      caller_agent_id?: string;
+      callerAgentId?: string;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    return this.batchUpdate(memories, options);
   }
 
   public async batchDelete(
     memories: Array<string | Record<string, unknown>>,
+    options: { caller_agent_id?: string; callerAgentId?: string } = {},
   ): Promise<Record<string, unknown>> {
     const normalized = memories.map((m) =>
       typeof m === "string"
         ? { memory_id: m, id: m }
         : { ...m, memory_id: m.memory_id ?? m.memoryId ?? m.id },
     );
-    return this.request("DELETE", "/v1/batch", { jsonBody: { memories: normalized } });
+    const payload: Record<string, unknown> = { memories: normalized };
+    const headers = this.applyLifecycleDefaults(payload, {
+      callerAgentId: options.caller_agent_id ?? options.callerAgentId,
+    });
+    return this.request("DELETE", "/v1/batch", { jsonBody: payload, headers });
   }
 
   public async batch_delete(
     memories: Array<string | Record<string, unknown>>,
+    options: { caller_agent_id?: string; callerAgentId?: string } = {},
   ): Promise<Record<string, unknown>> {
-    return this.batchDelete(memories);
+    return this.batchDelete(memories, options);
   }
 
   public async users(): Promise<Record<string, unknown>> {
-    return this.request("GET", "/v1/entities", {
-      params: {
-        org_id: this.orgId ?? undefined,
-        project_id: this.projectId ?? undefined,
-      },
-    });
+    return wrapResults(
+      await this.request<unknown>("GET", "/v1/entities", {
+        params: {
+          org_id: this.orgId ?? undefined,
+          project_id: this.projectId ?? undefined,
+        },
+      }),
+    );
   }
 
   public async deleteUsers(options: MemoryFilters = {}): Promise<Record<string, unknown>> {
@@ -740,9 +1367,11 @@ export class MemoryClient {
   }
 
   public async getWebhooks(projectId?: string): Promise<Record<string, unknown>> {
-    return this.request("GET", "/v1/webhooks", {
-      params: { project_id: projectId ?? this.projectId ?? undefined },
-    });
+    return wrapResults(
+      await this.request<unknown>("GET", "/v1/webhooks", {
+        params: { project_id: projectId ?? this.projectId ?? undefined },
+      }),
+    );
   }
 
   public async get_webhooks(projectId?: string): Promise<Record<string, unknown>> {
@@ -878,6 +1507,15 @@ export class Memory extends MemoryClient {
         (configDict.host as string),
       orgId: (configDict.org_id as string) || (configDict.orgId as string),
       projectId: (configDict.project_id as string) || (configDict.projectId as string),
+      agentId:
+        (configDict.agent_id as string) ||
+        (configDict.agentId as string) ||
+        (configDict.caller_agent_id as string) ||
+        (configDict.callerAgentId as string),
+      redactPolicy:
+        (configDict.redact_policy as RedactPolicy) || (configDict.redactPolicy as RedactPolicy),
+      redactScope:
+        (configDict.redact_scope as RedactScope) || (configDict.redactScope as RedactScope),
       model: configDict.model as string,
       timeoutMs: configDict.timeoutMs as number,
     }) as InstanceType<T>;

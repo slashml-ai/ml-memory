@@ -1,3 +1,4 @@
+"use strict";
 /**
  * @slashml/vercel-ai-provider -- Official / ml Memory Provider for the Vercel AI SDK
  *
@@ -5,8 +6,17 @@
  * `slashml`, `mem0`, `retrieveMemories`, `addMemories`, `getMemories`, `searchMemories`,
  * `SlashMLAILanguageModel`, `Mem0AILanguageModel`).
  */
-export const DEFAULT_BASE_URL = "https://api.slashml.ai";
-export const DEFAULT_SYSTEM_PREFIX = "System Memory Context (User Preferences & Past Facts):";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.mem0 = exports.slashml = exports.createMem0 = exports.Mem0AILanguageModel = exports.SlashMLAILanguageModel = exports.searchMemories = exports.DEFAULT_SYSTEM_PREFIX = exports.DEFAULT_BASE_URL = void 0;
+exports.normalizePromptToQuery = normalizePromptToQuery;
+exports.normalizeMessages = normalizeMessages;
+exports.getMemories = getMemories;
+exports.retrieveMemories = retrieveMemories;
+exports.addMemories = addMemories;
+exports.redactMemory = redactMemory;
+exports.createSlashML = createSlashML;
+exports.DEFAULT_BASE_URL = "https://api.slashml.ai";
+exports.DEFAULT_SYSTEM_PREFIX = "System Memory Context (User Preferences & Past Facts):";
 const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
 function getEnv(name) {
     const g = globalThis;
@@ -28,7 +38,7 @@ function resolveBaseUrl(config = {}) {
         config.host ||
         getEnv("SLASHML_BASE_URL") ||
         getEnv("SLASHML_API_URL") ||
-        DEFAULT_BASE_URL).replace(/\/+$/, "");
+        exports.DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 function extractTextFromContent(content) {
     if (typeof content === "string") {
@@ -49,7 +59,7 @@ function extractTextFromContent(content) {
     }
     return String(content ?? "");
 }
-export function normalizePromptToQuery(prompt) {
+function normalizePromptToQuery(prompt) {
     if (typeof prompt === "string") {
         return prompt.trim();
     }
@@ -64,7 +74,7 @@ export function normalizePromptToQuery(prompt) {
     }
     return String(prompt ?? "").trim();
 }
-export function normalizeMessages(messages) {
+function normalizeMessages(messages) {
     if (typeof messages === "string") {
         return [{ role: "user", content: messages }];
     }
@@ -97,16 +107,23 @@ async function callSlashML(method, path, config = {}, options = {}) {
     const headers = {
         Accept: "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "slashml-vercel-ai-provider/1.0.0",
+        "User-Agent": "slashml-vercel-ai-provider/1.0.3",
         Authorization: `Bearer ${apiKey}`,
         "X-API-Key": apiKey,
     };
     const orgId = config.org_id ?? config.orgId ?? getEnv("SLASHML_ORG_ID");
     const projectId = config.project_id ?? config.projectId ?? getEnv("SLASHML_PROJECT_ID");
+    const callerAgent = config.caller_agent_id ??
+        config.callerAgentId ??
+        config.agent_id ??
+        config.agentId ??
+        getEnv("SLASHML_AGENT_ID");
     if (orgId)
         headers["X-SlashML-Org-Id"] = String(orgId);
     if (projectId)
         headers["X-SlashML-Project-Id"] = String(projectId);
+    if (callerAgent)
+        headers["X-SlashML-Agent-Id"] = String(callerAgent);
     const fetchFn = config.fetchImpl ?? globalThis.fetch;
     const maxRetries = config.maxRetries ?? 3;
     const timeoutMs = config.timeoutMs ?? 30_000;
@@ -160,7 +177,7 @@ async function callSlashML(method, path, config = {}, options = {}) {
 /**
  * Fetch raw memory objects as an array for a given user/agent/run scope (or query).
  */
-export async function getMemories(promptOrConfig, maybeConfig) {
+async function getMemories(promptOrConfig, maybeConfig) {
     let query = null;
     let config = {};
     if (typeof promptOrConfig === "string" || Array.isArray(promptOrConfig)) {
@@ -172,6 +189,9 @@ export async function getMemories(promptOrConfig, maybeConfig) {
     }
     const userId = config.user_id ?? config.userId ?? undefined;
     const agentId = config.agent_id ?? config.agentId ?? undefined;
+    const callerAgentId = config.caller_agent_id ?? config.callerAgentId ?? agentId ?? getEnv("SLASHML_AGENT_ID") ?? undefined;
+    const redactPolicy = config.redact_policy ?? config.redactPolicy ?? getEnv("SLASHML_REDACT_POLICY") ?? undefined;
+    const redactScope = config.redact_scope ?? config.redactScope ?? getEnv("SLASHML_REDACT_SCOPE") ?? undefined;
     const appId = config.app_id ?? config.appId ?? undefined;
     const runId = config.run_id ?? config.runId ?? undefined;
     const limit = config.top_k ?? config.limit ?? 5;
@@ -187,6 +207,9 @@ export async function getMemories(promptOrConfig, maybeConfig) {
                 top_k: limit,
                 filters: config.filters ?? config.metadata ?? null,
                 threshold: config.threshold ?? null,
+                ...(callerAgentId ? { caller_agent_id: callerAgentId } : {}),
+                ...(redactPolicy !== undefined ? { redact_policy: redactPolicy } : {}),
+                ...(redactScope !== undefined ? { redact_scope: redactScope } : {}),
             },
         });
         if (Array.isArray(res))
@@ -204,6 +227,14 @@ export async function getMemories(promptOrConfig, maybeConfig) {
             app_id: appId,
             run_id: runId,
             limit: config.limit ?? 100,
+            ...(redactPolicy !== undefined
+                ? {
+                    redact_policy: Array.isArray(redactPolicy)
+                        ? redactPolicy.join(",")
+                        : redactPolicy,
+                }
+                : {}),
+            ...(redactScope !== undefined ? { redact_scope: redactScope } : {}),
         },
     });
     if (Array.isArray(res))
@@ -214,16 +245,16 @@ export async function getMemories(promptOrConfig, maybeConfig) {
         return res.memories;
     return [];
 }
-export const searchMemories = getMemories;
+exports.searchMemories = getMemories;
 /**
  * Retrieve relevant memories for a prompt and format them into a ready-to-use system prompt string.
  */
-export async function retrieveMemories(prompt, config = {}) {
+async function retrieveMemories(prompt, config = {}) {
     const memories = await getMemories(prompt, config);
     if (!memories || memories.length === 0) {
         return "";
     }
-    const prefix = config.systemPromptPrefix ?? DEFAULT_SYSTEM_PREFIX;
+    const prefix = config.systemPromptPrefix ?? exports.DEFAULT_SYSTEM_PREFIX;
     const bulletLines = memories
         .map((m) => String(m.memory ?? m.text ?? m.content ?? "").trim())
         .filter(Boolean)
@@ -236,8 +267,16 @@ export async function retrieveMemories(prompt, config = {}) {
 /**
  * Extract and store persistent memories from a Vercel AI SDK message array (`LanguageModelPrompt`).
  */
-export async function addMemories(messages, config = {}) {
+async function addMemories(messages, config = {}) {
     const normalized = normalizeMessages(messages);
+    const callerAgentId = config.caller_agent_id ??
+        config.callerAgentId ??
+        config.agent_id ??
+        config.agentId ??
+        getEnv("SLASHML_AGENT_ID") ??
+        undefined;
+    const redactPolicy = config.redact_policy ?? config.redactPolicy ?? getEnv("SLASHML_REDACT_POLICY") ?? undefined;
+    const redactScope = config.redact_scope ?? config.redactScope ?? getEnv("SLASHML_REDACT_SCOPE") ?? undefined;
     return callSlashML("POST", "/v1/memories", config, {
         jsonBody: {
             messages: normalized,
@@ -247,12 +286,53 @@ export async function addMemories(messages, config = {}) {
             run_id: config.run_id ?? config.runId ?? null,
             metadata: config.metadata ?? {},
             infer: true,
+            ...(callerAgentId ? { caller_agent_id: callerAgentId } : {}),
+            ...(redactPolicy !== undefined ? { redact_policy: redactPolicy } : {}),
+            ...(redactScope !== undefined ? { redact_scope: redactScope } : {}),
+        },
+    });
+}
+/**
+ * Redact sensitive spans statelessly (`text`) or in-place on a stored `memoryId` / `memory_id`.
+ */
+async function redactMemory(textOrOptions, config = {}) {
+    const opts = typeof textOrOptions === "string" ? { text: textOrOptions } : (textOrOptions ?? {});
+    const memoryId = opts.memory_id ?? opts.memoryId;
+    const redactPolicy = opts.redact_policy ??
+        opts.redactPolicy ??
+        config.redact_policy ??
+        config.redactPolicy ??
+        getEnv("SLASHML_REDACT_POLICY") ??
+        undefined;
+    const callerAgentId = config.caller_agent_id ??
+        config.callerAgentId ??
+        config.agent_id ??
+        config.agentId ??
+        getEnv("SLASHML_AGENT_ID") ??
+        undefined;
+    return callSlashML("POST", "/v1/memory/redact", config, {
+        jsonBody: {
+            ...(opts.text !== undefined ? { text: opts.text } : {}),
+            ...(memoryId !== undefined ? { memory_id: memoryId } : {}),
+            ...(redactPolicy !== undefined ? { redact_policy: redactPolicy } : {}),
+            ...(callerAgentId ? { caller_agent_id: callerAgentId } : {}),
         },
     });
 }
 function mergeConfig(baseSettings = {}, callConfig = {}) {
     const nested = baseSettings.slashmlConfig ?? baseSettings.mem0Config ?? {};
-    return {
+    const baseAgentId = baseSettings.agent_id ??
+        baseSettings.agentId ??
+        nested.agent_id ??
+        nested.agentId;
+    const callAgentId = callConfig.agent_id ?? callConfig.agentId;
+    const hasUserScope = Boolean(callConfig.user_id ??
+        callConfig.userId ??
+        baseSettings.user_id ??
+        baseSettings.userId ??
+        nested.user_id ??
+        nested.userId);
+    const merged = {
         ...baseSettings,
         ...nested,
         ...callConfig,
@@ -268,8 +348,17 @@ function mergeConfig(baseSettings = {}, callConfig = {}) {
             getEnv("SLASHML_API_KEY") ||
             getEnv("MEM0_API_KEY"),
     };
+    if (baseAgentId && !callAgentId) {
+        merged.caller_agent_id =
+            merged.caller_agent_id ?? merged.callerAgentId ?? String(baseAgentId);
+        if (hasUserScope) {
+            delete merged.agent_id;
+            delete merged.agentId;
+        }
+    }
+    return merged;
 }
-export class SlashMLAILanguageModel {
+class SlashMLAILanguageModel {
     specificationVersion = "v1";
     defaultObjectGenerationMode = "json";
     provider;
@@ -292,11 +381,14 @@ export class SlashMLAILanguageModel {
     async addMemories(messages) {
         return addMemories(messages, this.config);
     }
+    async redactMemory(textOrOptions) {
+        return redactMemory(textOrOptions, this.config);
+    }
     async prepareCall(options = {}) {
         const rawPrompt = (options.prompt ?? options.messages ?? "");
         const rawMemories = await getMemories(rawPrompt, this.config);
         const systemMemory = rawMemories.length > 0
-            ? `${this.config.systemPromptPrefix ?? DEFAULT_SYSTEM_PREFIX}\n${rawMemories
+            ? `${this.config.systemPromptPrefix ?? exports.DEFAULT_SYSTEM_PREFIX}\n${rawMemories
                 .map((m) => `- ${String(m.memory ?? m.text ?? "")}`)
                 .join("\n")}`
             : "";
@@ -393,12 +485,13 @@ export class SlashMLAILanguageModel {
         };
     }
 }
-export const Mem0AILanguageModel = SlashMLAILanguageModel;
+exports.SlashMLAILanguageModel = SlashMLAILanguageModel;
+exports.Mem0AILanguageModel = SlashMLAILanguageModel;
 /**
  * Create a Vercel AI SDK Provider (`ProviderV1` / `ProviderV2` / `ProviderV3` compatible)
  * that automatically retrieves `/ ml` memories and injects them into `generateText` / `streamText`.
  */
-export function createSlashML(providerSettings = {}) {
+function createSlashML(providerSettings = {}) {
     const createModel = (modelId, modelConfig = {}) => new SlashMLAILanguageModel(modelId, providerSettings, modelConfig);
     const provider = Object.assign((modelId, settings) => createModel(modelId, settings), {
         languageModel: (modelId, settings) => createModel(modelId, settings),
@@ -410,7 +503,7 @@ export function createSlashML(providerSettings = {}) {
 /**
  * 100% 1:1 drop-in alias for `@mem0/vercel-ai-provider`'s `createMem0`.
  */
-export const createMem0 = createSlashML;
-export const slashml = createSlashML();
-export const mem0 = slashml;
-export default createSlashML;
+exports.createMem0 = createSlashML;
+exports.slashml = createSlashML();
+exports.mem0 = exports.slashml;
+exports.default = createSlashML;
