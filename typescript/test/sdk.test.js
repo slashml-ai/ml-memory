@@ -988,9 +988,7 @@ test("Ambient hooks: MemoryClient.intervene and CLI --hook", async () => {
       file_path: "src/payments/checkout.py",
     });
 
-    // Verify 1.0.13 Stop circuit-breaker contract:
-    // (a) loop_count >= 3 (MAX_STOP_BLOCKS_PER_PROMPT) short-circuits locally (<1ms) without hitting server
-    // (b) stop_hook_active=true with loop_count < 3 forwards stop_blocked_memory_ids + stop_retry_count for chained distinct violations
+    // Verify Stop retry bounds and turn_blocked_memory_ids forwarding:
     const mcpBinPath = path.resolve(__dirname, "../../mcp/bin/slashml-mcp.js");
     for (const hookBin of [cliPath, mcpBinPath]) {
       const ceilingOut = await new Promise((resolve, reject) => {
@@ -1551,5 +1549,212 @@ test("Redaction & per-agent access control SDK methods + X-SlashML-Agent-Id head
     assert.equal(delAgent.deleted, true);
   } finally {
     await mock.close();
+  }
+});
+
+test("Hook launcher, --hook-daemon keep-alive, async PostToolUse, 2>/dev/null skip, and omitted-invocationNum Stop retry", async () => {
+  const cliPath = path.join(__dirname, "..", "bin", "cli.js");
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "slashml_daemon_test_"));
+  const sockPath = path.join(tmpRoot, "d.sock");
+  const tmpTelemetry = path.join(tmpRoot, "telemetry.json");
+  const tmpHookState = path.join(tmpRoot, "state.json");
+  const transcriptPath = path.join(tmpRoot, "transcript.jsonl");
+  const http = require("node:http");
+
+  const mock = await createMockServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.method === "POST" && req.url === "/v1/memory/intervene") {
+      const ev = req.body.hook_event_name;
+      const blockedList = req.body.turn_blocked_memory_ids || [];
+      if (ev === "Stop") {
+        if (blockedList.includes("enforce-pnpm-lockfile")) {
+          res.end(
+            JSON.stringify({
+              action: "SILENT",
+              should_intervene: false,
+              repeat_suppressed_memory_ids: ["enforce-pnpm-lockfile"],
+              hook_output: {},
+            })
+          );
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            action: "BLOCK",
+            should_intervene: true,
+            intervention_severity: "BLOCK",
+            intervention_message:
+              "[MEMORY INTERVENTION]: (enforce-pnpm-lockfile, rule) Always use pnpm in this workspace",
+            violated_memory_id: "enforce-pnpm-lockfile",
+            violated_memory_ids: ["enforce-pnpm-lockfile"],
+            hook_output: {
+              decision: "continue",
+              reason:
+                "[MEMORY INTERVENTION]: (enforce-pnpm-lockfile, rule) Always use pnpm in this workspace",
+            },
+          })
+        );
+        return;
+      }
+      res.end(JSON.stringify({ action: "SILENT", should_intervene: false, hook_output: {} }));
+      return;
+    }
+    res.end(JSON.stringify({ status: "ok" }));
+  });
+
+  function runCliHook(args, stdinObj, extraEnv = {}) {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(
+        process.execPath,
+        [cliPath, "--hook", "--base-url", mock.baseUrl, "--api-key", "sml_live_daemon", ...args],
+        {
+          env: {
+            ...process.env,
+            HOME: tmpRoot,
+            SLASHML_HOOK_SOCKET: sockPath,
+            SLASHML_FORCE_HOOK_DAEMON: "1",
+            SLASHML_TELEMETRY_PATH: tmpTelemetry,
+            SLASHML_HOOK_STATE_PATH: tmpHookState,
+            ...extraEnv,
+          },
+        }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => (stdout += d.toString()));
+      proc.on("error", reject);
+      proc.on("close", () => resolve(JSON.parse(stdout.trim() || "{}")));
+      proc.stdin.end(JSON.stringify(stdinObj));
+    });
+  }
+
+  try {
+    // 1. Auto-upgrade legacy `npx -y @slashml/memory --hook` in Claude settings to direct node launcher with 30s timeout
+    const claudeDir = path.join(tmpRoot, ".claude");
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, "settings.json"),
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              hooks: [{ type: "command", command: "npx -y @slashml/memory --hook", timeout: 10 }],
+            },
+          ],
+        },
+      }),
+      "utf8"
+    );
+    await new Promise((resolve, reject) => {
+      const p = spawn(process.execPath, [cliPath, "--install-hooks"], {
+        env: { ...process.env, HOME: tmpRoot, SLASHML_API_KEY: "sml_live_daemon" },
+      });
+      p.on("error", reject);
+      p.on("close", () => resolve());
+    });
+    const launcherPath = path.join(tmpRoot, ".slashml", "bin", "slashml-hook.js");
+    assert.ok(fs.existsSync(launcherPath), "Expected standalone launcher slashml-hook.js to be installed");
+    const upgradedClaude = JSON.parse(fs.readFileSync(path.join(claudeDir, "settings.json"), "utf8"));
+    const upgradedHook = upgradedClaude.hooks.UserPromptSubmit[0].hooks[0];
+    assert.ok(!upgradedHook.command.includes("npx "), `Expected npx to be upgraded, got: ${upgradedHook.command}`);
+    assert.ok(upgradedHook.command.includes("slashml-hook.js"), "Expected command to invoke slashml-hook.js");
+    assert.equal(upgradedHook.timeout, 30);
+
+    // 2. Read-only Bash commands with `2>/dev/null` and `2>&1` skip locally with zero HTTP calls
+    const ro1 = await runCliHook([], {
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "ls -la /tmp 2>/dev/null" },
+      session_id: "sess_d1",
+    });
+    const ro2 = await runCliHook([], {
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "git status 2>&1" },
+      session_id: "sess_d1",
+    });
+    assert.deepEqual(ro1, {});
+    assert.deepEqual(ro2, {});
+    const interveneReqsAfterRo = mock.requests.filter((r) => r.url === "/v1/memory/intervene");
+    assert.equal(interveneReqsAfterRo.length, 0);
+
+    // 3. Synchronous UserPromptSubmit spawns detached `--hook-daemon` on first call without blocking, then reuses sockPath
+    await runCliHook(["--hook-event", "PreInvocation"], {
+      conversationId: "conv_slug_1",
+      transcriptPath,
+      prompt: "Explain the layout of the project",
+      invocationNum: 1,
+    });
+    for (let waitSock = 0; waitSock < 30 && !fs.existsSync(sockPath); waitSock++) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.ok(fs.existsSync(sockPath), "Expected hook daemon Unix socket to exist");
+
+    // 4. Async PostToolUse enqueues onto daemon and delivers to mock server without blocking caller
+    const postOut = await runCliHook([], {
+      hook_event_name: "PostToolUse",
+      tool_name: "Write",
+      tool_input: { file_path: "src/config.json", content: "{\"port\": 8080}" },
+      session_id: "conv_slug_1",
+    });
+    assert.deepEqual(postOut, {});
+    for (let waitIdx = 0; waitIdx < 30; waitIdx++) {
+      if (mock.requests.some((r) => r.url === "/v1/memory/intervene" && r.body.hook_event_name === "PostToolUse")) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(
+      mock.requests.some((r) => r.url === "/v1/memory/intervene" && r.body.hook_event_name === "PostToolUse"),
+      "Expected async PostToolUse to reach server via hook daemon"
+    );
+
+    // 5. Stop blocks on slug ID -> PreInvocation without invocationNum preserves turn_blocked_memory_ids -> Stop retry suppresses
+    fs.writeFileSync(
+      transcriptPath,
+      [
+        JSON.stringify({ type: "USER_INPUT", content: "Install workspace packages" }),
+        JSON.stringify({
+          type: "SYSTEM",
+          content:
+            "[MEMORY INTERVENTION]: (enforce-pnpm-lockfile, rule) Always use pnpm in this workspace",
+        }),
+        JSON.stringify({ type: "PLANNER_RESPONSE", content: "Running yarn install in workspace" }),
+      ].join("\n") + "\n",
+      "utf8"
+    );
+    const stop1 = await runCliHook(["--hook-event", "Stop"], {
+      conversationId: "conv_slug_1",
+      transcriptPath,
+    });
+    assert.equal(stop1.decision, "continue");
+    const stop1Req = mock.requests.filter((r) => r.url === "/v1/memory/intervene" && r.body.hook_event_name === "Stop").pop();
+    assert.ok(
+      (stop1Req.body.whispered_memory_ids || []).includes("enforce-pnpm-lockfile"),
+      "Expected slug rule ID from [MEMORY INTERVENTION] header to be extracted into whispered_memory_ids"
+    );
+
+    // PreInvocation emitted on Stop retry without invocationNum
+    await runCliHook(["--hook-event", "PreInvocation"], {
+      conversationId: "conv_slug_1",
+      transcriptPath,
+      prompt: "[MEMORY INTERVENTION]: retry turn without invocationNum",
+    });
+
+    const stop2 = await runCliHook(["--hook-event", "Stop"], {
+      conversationId: "conv_slug_1",
+      transcriptPath,
+    });
+    assert.deepEqual(stop2, {});
+    const stop2Req = mock.requests.filter((r) => r.url === "/v1/memory/intervene" && r.body.hook_event_name === "Stop").pop();
+    assert.deepEqual(stop2Req.body.turn_blocked_memory_ids, ["enforce-pnpm-lockfile"]);
+    assert.equal(stop2Req.body.stop_retry_count, 1);
+  } finally {
+    await new Promise((resolve) => {
+      const req = http.request({ socketPath: sockPath, path: "/shutdown", method: "POST" }, () => resolve());
+      req.on("error", () => resolve());
+      req.end();
+    });
+    await mock.close();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

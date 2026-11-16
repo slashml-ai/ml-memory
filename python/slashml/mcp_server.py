@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -706,7 +707,7 @@ class SlashMLMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": proto,
-                    "serverInfo": {"name": "ml-memory", "version": "1.0.12"},
+                    "serverInfo": {"name": "ml-memory", "version": "1.0.13"},
                     "capabilities": {"tools": {}},
                 },
             }
@@ -830,6 +831,36 @@ def _upsert_slashml_rule_block(file_path: Path, body_text: str = AMBIENT_RULE_MA
     return True
 
 
+def _is_slashml_hook_command(cmd: Any) -> bool:
+    if not isinstance(cmd, str):
+        return False
+    return (
+        "slashml" in cmd
+        or "@slashml/" in cmd
+        or "slashml-hook.js" in cmd
+        or "slashml.mcp_server" in cmd
+    )
+
+
+def _resolve_fast_hook_command(home: Path) -> tuple[str, list[str]]:
+    import shlex
+    import shutil
+
+    js_launcher = home / ".slashml" / "bin" / "slashml-hook.js"
+    node_bin = shutil.which("node")
+    if node_bin and js_launcher.exists():
+        return (
+            f"{shlex.quote(node_bin)} {shlex.quote(str(js_launcher))} --hook",
+            [node_bin, str(js_launcher), "--hook"],
+        )
+    if shutil.which("slashml-mcp"):
+        return ("slashml-mcp --hook", ["slashml-mcp", "--hook"])
+    return (
+        f"{shlex.quote(sys.executable)} -m slashml.mcp_server --hook",
+        [sys.executable, "-m", "slashml.mcp_server", "--hook"],
+    )
+
+
 def install_ambient_hooks(
     api_key: str | None = None,
     *,
@@ -837,7 +868,7 @@ def install_ambient_hooks(
     only_if_dir_exists: bool = False,
 ) -> Path | None:
     home = Path.home()
-    hook_cmd = "slashml-mcp --hook"
+    hook_cmd, hook_argv = _resolve_fast_hook_command(home)
     claude_dir = home / ".claude"
     claude_settings_path = claude_dir / "settings.json"
     result_path: Path | None = None
@@ -855,14 +886,13 @@ def install_ambient_hooks(
             settings["hooks"] = {}
         needs_write = False
         for event_name in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+            target_event_cmd = f"{hook_cmd} --hook-event {event_name}"
             existing_hooks = settings["hooks"].get(event_name)
             has_slashml = isinstance(existing_hooks, list) and any(
                 isinstance(entry, dict)
                 and isinstance(entry.get("hooks"), list)
                 and any(
-                    isinstance(h, dict)
-                    and isinstance(h.get("command"), str)
-                    and ("slashml" in h["command"] or "@slashml/" in h["command"])
+                    isinstance(h, dict) and _is_slashml_hook_command(h.get("command"))
                     for h in entry["hooks"]
                 )
                 for entry in existing_hooks
@@ -871,10 +901,21 @@ def install_ambient_hooks(
                 settings["hooks"][event_name] = [
                     {
                         "matcher": ".*",
-                        "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}],
+                        "hooks": [{"type": "command", "command": target_event_cmd, "timeout": 30}],
                     }
                 ]
                 needs_write = True
+            elif isinstance(existing_hooks, list):
+                for entry in existing_hooks:
+                    if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
+                        for h in entry["hooks"]:
+                            if isinstance(h, dict) and _is_slashml_hook_command(h.get("command")):
+                                if not isinstance(h.get("timeout"), (int, float)) or h["timeout"] < 30:
+                                    h["timeout"] = 30
+                                    needs_write = True
+                                if str(h.get("command", "")).strip().startswith("npx "):
+                                    h["command"] = target_event_cmd
+                                    needs_write = True
         if api_key:
             env_dict = settings.get("env") if isinstance(settings.get("env"), dict) else {}
             if not quiet or not env_dict.get("SLASHML_API_KEY"):
@@ -960,10 +1001,30 @@ def install_ambient_hooks(
                 codex_hooks["hooks"][event_name] = [
                     {
                         "matcher": ".*",
-                        "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}],
+                        "hooks": [{"type": "command", "command": f"{hook_cmd} --hook-event {event_name}", "timeout": 30}],
                     }
                 ]
             codex_hooks_path.write_text(json.dumps(codex_hooks, indent=2) + "\n", encoding="utf-8")
+        else:
+            try:
+                codex_cfg = json.loads(codex_hooks_path.read_text(encoding="utf-8"))
+                codex_changed = False
+                if isinstance(codex_cfg, dict) and isinstance(codex_cfg.get("hooks"), dict):
+                    for event_name in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+                        for group in codex_cfg["hooks"].get(event_name) or ():
+                            if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                                for h in group["hooks"]:
+                                    if isinstance(h, dict) and _is_slashml_hook_command(h.get("command")):
+                                        if not isinstance(h.get("timeout"), (int, float)) or h["timeout"] < 30:
+                                            h["timeout"] = 30
+                                            codex_changed = True
+                                        if str(h.get("command", "")).strip().startswith("npx "):
+                                            h["command"] = f"{hook_cmd} --hook-event {event_name}"
+                                            codex_changed = True
+                if codex_changed:
+                    codex_hooks_path.write_text(json.dumps(codex_cfg, indent=2) + "\n", encoding="utf-8")
+            except Exception:
+                pass
         try:
             _upsert_slashml_rule_block(codex_dir / "AGENTS.md")
         except Exception:
@@ -996,23 +1057,46 @@ def install_ambient_hooks(
         if not quiet or not has_native_gemini_hooks:
             gemini_hooks = {
                 "slashml-ambient-memory": {
-                    "PreInvocation": [{"type": "command", "command": hook_cmd, "timeout": 10}],
+                    "PreInvocation": [{"type": "command", "command": f"{hook_cmd} --hook-event PreInvocation", "timeout": 30}],
                     "PreToolUse": [
                         {
                             "matcher": "run_command|edit_file|write_file",
-                            "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}],
+                            "hooks": [{"type": "command", "command": f"{hook_cmd} --hook-event PreToolUse", "timeout": 30}],
                         }
                     ],
                     "PostToolUse": [
                         {
                             "matcher": "run_command|edit_file|write_file",
-                            "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}],
+                            "hooks": [{"type": "command", "command": f"{hook_cmd} --hook-event PostToolUse", "timeout": 30}],
                         }
                     ],
-                    "Stop": [{"type": "command", "command": hook_cmd, "timeout": 10}],
+                    "Stop": [{"type": "command", "command": f"{hook_cmd} --hook-event Stop", "timeout": 30}],
                 }
             }
             gemini_hooks_path.write_text(json.dumps(gemini_hooks, indent=2) + "\n", encoding="utf-8")
+        else:
+            try:
+                gem_cfg = json.loads(gemini_hooks_path.read_text(encoding="utf-8"))
+                root_obj = gem_cfg.get("slashml-ambient-memory") if isinstance(gem_cfg, dict) else None
+                gem_changed = False
+                if isinstance(root_obj, dict):
+                    for event_name in ("PreInvocation", "PreToolUse", "PostToolUse", "Stop"):
+                        for item in root_obj.get(event_name) or ():
+                            if not isinstance(item, dict):
+                                continue
+                            leaves = item["hooks"] if isinstance(item.get("hooks"), list) else [item]
+                            for h in leaves:
+                                if isinstance(h, dict) and _is_slashml_hook_command(h.get("command")):
+                                    if not isinstance(h.get("timeout"), (int, float)) or h["timeout"] < 30:
+                                        h["timeout"] = 30
+                                        gem_changed = True
+                                    if str(h.get("command", "")).strip().startswith("npx "):
+                                        h["command"] = f"{hook_cmd} --hook-event {event_name}"
+                                        gem_changed = True
+                if gem_changed:
+                    gemini_hooks_path.write_text(json.dumps(gem_cfg, indent=2) + "\n", encoding="utf-8")
+            except Exception:
+                pass
         gemini_plugin_json = gemini_plugin_dir / "plugin.json"
         if not gemini_plugin_json.exists():
             gemini_plugin_json.write_text(
@@ -1037,14 +1121,16 @@ def install_ambient_hooks(
             opencode_plugin_path = opencode_dir / "plugins" / "slashml-memory.js"
             if not quiet or not opencode_plugin_path.exists():
                 opencode_plugin_path.parent.mkdir(parents=True, exist_ok=True)
+                bin_json = json.dumps(hook_argv[0])
+                args_prefix_json = json.dumps(hook_argv[1:])[:-1]
                 opencode_plugin_code = (
                     'import { spawnSync } from "node:child_process";\n'
                     'function runHook(event, payload) {\n'
                     '  try {\n'
-                    '    const res = spawnSync("npx", ["-y", "@slashml/memory", "--hook", "--hook-event", event], {\n'
+                    f'    const res = spawnSync({bin_json}, {args_prefix_json}, "--hook-event", event], {{\n'
                     '      input: JSON.stringify({ hook_event_name: event, ...payload }),\n'
                     '      encoding: "utf8",\n'
-                    '      timeout: 8000,\n'
+                    '      timeout: 30000,\n'
                     '    });\n'
                     '    if (res.stdout && res.stdout.trim().startsWith("{")) return JSON.parse(res.stdout.trim());\n'
                     '  } catch {}\n'
@@ -1155,16 +1241,16 @@ def install_ambient_hooks(
                         "hooks:",
                         "  pre_llm_call:",
                         f'    - command: "{script_path} pre_llm_call"',
-                        "      timeout: 10",
+                        "      timeout: 30",
                         "  pre_tool_call:",
                         f'    - command: "{script_path} pre_tool_call"',
-                        "      timeout: 10",
+                        "      timeout: 30",
                         "  post_tool_call:",
                         f'    - command: "{script_path} post_tool_call"',
-                        "      timeout: 10",
+                        "      timeout: 30",
                         "  post_llm_call:",
                         f'    - command: "{script_path} post_llm_call"',
-                        "      timeout: 10",
+                        "      timeout: 30",
                     ]
                 )
                 yaml_text = (yaml_text.rstrip("\n") + "\n\n" + hooks_block + "\n") if yaml_text.strip() else (hooks_block + "\n")
@@ -1407,7 +1493,7 @@ def run_ambient_hook_mode(
         "AfterAgent": "Stop",
     }
     hook_event = event_map.get(raw_event_name, raw_event_name)
-    if not is_gemini_hook and raw_event_name == "Stop" and payload.get("stop_hook_active"):
+    if hook_event == "Stop" and int(payload.get("loop_count") or 0) >= 3:
         sys.stdout.write("{}\n")
         sys.stdout.flush()
         return 0
@@ -1488,7 +1574,9 @@ def run_ambient_hook_mode(
         and tool_name
         and re.match(r"^(bash|run_command|shell)$", tool_name, re.IGNORECASE)
     ):
-        cmd_check = re.sub(r"^\s*cd\s+[^&;]+(?:&&|;)\s*", "", str(tool_summary or "").strip().lower()).strip()
+        cmd_check = re.sub(r"^\s*cd\s+[^&;]+(?:&&|;)\s*", "", str(tool_summary or "").strip().lower())
+        cmd_check = re.sub(r"\b2>\s*/dev/null\b", " ", cmd_check)
+        cmd_check = re.sub(r"\b2>&1\b", " ", cmd_check).strip()
         is_read_only_cmd = bool(
             re.match(
                 r"^(ls\b|pwd\b|cat\s|head\s|tail\s|grep\s|rg\s|find\s|git\s+(status|log|diff|branch|show|worktree|rev-parse|remote|tag|describe)\b|which\s|whoami\b|stat\s|wc\s)",
@@ -1557,7 +1645,45 @@ def run_ambient_hook_mode(
     delta_text = re.sub(r"[\u2500-\u257f]+", " ", delta_text)
     delta_text = re.sub(r"\s+", " ", delta_text).strip()[:1024]
 
+    whispered_blocks_by_session = dedup_state.get("whispered_blocks_by_session")
+    if not isinstance(whispered_blocks_by_session, dict):
+        whispered_blocks_by_session = {}
+        dedup_state["whispered_blocks_by_session"] = whispered_blocks_by_session
+    stop_turn_by_session = dedup_state.get("stop_turn_by_session")
+    if not isinstance(stop_turn_by_session, dict):
+        stop_turn_by_session = {}
+        dedup_state["stop_turn_by_session"] = stop_turn_by_session
+    whisper_key = session_id or scope_state_key
+    prev_stop_entry = stop_turn_by_session.get(whisper_key) if whisper_key else None
+    now_ms = int(time.time() * 1000)
+    is_stop_retry_pre_inv = bool(
+        raw_event_name == "PreInvocation"
+        and payload.get("invocationNum") is None
+        and payload.get("executionNum") is None
+        and isinstance(prev_stop_entry, dict)
+        and prev_stop_entry.get("awaiting_stop_retry")
+        and (now_ms - int(prev_stop_entry.get("blocked_at_ms") or 0)) < 120000
+    )
+    is_mid_turn_cont = (
+        raw_event_name == "PreInvocation" and int(payload.get("invocationNum") or 1) > 1
+    ) or is_stop_retry_pre_inv
+    turn_state_dirty = False
+    if hook_event == "UserPromptSubmit" and whisper_key:
+        if is_stop_retry_pre_inv and isinstance(prev_stop_entry, dict):
+            prev_stop_entry["awaiting_stop_retry"] = False
+            turn_state_dirty = True
+        elif not is_mid_turn_cont:
+            whispered_blocks_by_session[whisper_key] = []
+            stop_turn_by_session[whisper_key] = {"blocked_ids": [], "retry_count": 0}
+            turn_state_dirty = True
+
     if not delta_text or len(delta_text) < 2:
+        if turn_state_dirty:
+            try:
+                dedup_path.parent.mkdir(parents=True, exist_ok=True)
+                dedup_path.write_text(json.dumps(dedup_state), encoding="utf-8")
+            except Exception:
+                pass
         _record_local_hook_drop(_estimate_tokens(raw_delta or raw_input))
         sys.stdout.write("{}\n")
         sys.stdout.flush()
@@ -1602,10 +1728,6 @@ def run_ambient_hook_mode(
     if not isinstance(whispered_by_session, dict):
         whispered_by_session = {}
         dedup_state["whispered_by_session"] = whispered_by_session
-    whispered_blocks_by_session = dedup_state.get("whispered_blocks_by_session")
-    if not isinstance(whispered_blocks_by_session, dict):
-        whispered_blocks_by_session = {}
-        dedup_state["whispered_blocks_by_session"] = whispered_blocks_by_session
     blocked_by_session = dedup_state.get("blocked_by_session")
     if not isinstance(blocked_by_session, dict):
         blocked_by_session = {}
@@ -1618,8 +1740,6 @@ def run_ambient_hook_mode(
     if not isinstance(blocked_actions_by_session, dict):
         blocked_actions_by_session = {}
         dedup_state["blocked_actions_by_session"] = blocked_actions_by_session
-    whisper_key = session_id or scope_state_key
-    is_mid_turn_cont = raw_event_name == "PreInvocation" and int(payload.get("invocationNum") or 1) > 1
     target_sig = (
         str(
             tool_in.get("file_path")
@@ -1632,8 +1752,21 @@ def run_ambient_hook_mode(
         if isinstance(tool_in, dict)
         else delta_text[:120].lower()
     )
-    if hook_event == "UserPromptSubmit" and not is_mid_turn_cont and whisper_key:
-        whispered_blocks_by_session[whisper_key] = []
+    stop_entry = (
+        stop_turn_by_session.get(whisper_key)
+        if whisper_key and isinstance(stop_turn_by_session.get(whisper_key), dict)
+        else {"blocked_ids": [], "retry_count": 0}
+    )
+    stop_blocked_ids = [
+        str(x).strip()
+        for x in (stop_entry.get("blocked_ids") or ())
+        if str(x).strip()
+    ]
+    stop_retry_count = max(0, int(stop_entry.get("retry_count") or 0))
+    if hook_event == "Stop" and stop_retry_count >= 3:
+        sys.stdout.write("{}\n")
+        sys.stdout.flush()
+        return 0
     if hook_event == "PreToolUse" and whisper_key:
         prev_act = blocked_actions_by_session.get(whisper_key, [])
         if isinstance(prev_act, list) and prev_act:
@@ -1688,7 +1821,9 @@ def run_ambient_hook_mode(
             hook_event_name=hook_event,
             prompt=str(payload.get("prompt") or delta_text),
             last_assistant_message=delta_text if hook_event == "Stop" else None,
-            stop_hook_active=bool(payload.get("stop_hook_active")) if hook_event == "Stop" else False,
+            stop_hook_active=(bool(payload.get("stop_hook_active")) or stop_retry_count > 0) if hook_event == "Stop" else False,
+            turn_blocked_memory_ids=stop_blocked_ids if hook_event == "Stop" and stop_blocked_ids else None,
+            stop_retry_count=stop_retry_count if hook_event == "Stop" else 0,
             whispered_memory_ids=session_whispered if session_whispered else None,
             overridden_memory_ids=overridden_memory_ids if overridden_memory_ids else None,
             tool_name=tool_name,
@@ -1747,6 +1882,20 @@ def run_ambient_hook_mode(
                         if not isinstance(prev_blk, list):
                             prev_blk = []
                         blocked_by_session[whisper_key] = list(dict.fromkeys([*prev_blk, *triggered_ids]))[-16:]
+                        if hook_event == "Stop":
+                            novel_stop_ids = [mid for mid in triggered_ids if mid not in stop_blocked_ids]
+                            if triggered_ids and not novel_stop_ids:
+                                resp["hook_output"] = {}
+                                if whisper_key and isinstance(stop_turn_by_session.get(whisper_key), dict):
+                                    stop_turn_by_session[whisper_key]["awaiting_stop_retry"] = False
+                            else:
+                                merged_stop_ids = list(dict.fromkeys([*stop_blocked_ids, *novel_stop_ids]))[-16:]
+                                stop_turn_by_session[whisper_key] = {
+                                    "blocked_ids": merged_stop_ids,
+                                    "retry_count": stop_retry_count + 1,
+                                    "awaiting_stop_retry": True,
+                                    "blocked_at_ms": now_ms,
+                                }
                         if hook_event == "PreToolUse":
                             prev_act_list = blocked_actions_by_session.get(whisper_key, [])
                             if not isinstance(prev_act_list, list):
@@ -1790,7 +1939,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(prog="slashml-mcp")
     parser.add_argument("command", nargs="?", default=None, help="Optional command (e.g. 'init')")
-    parser.add_argument("-v", "--version", action="version", version="1.0.12")
+    parser.add_argument("-v", "--version", action="version", version="1.0.13")
     parser.add_argument("--init", action="store_true", help="Configure ml-memory MCP in IDE configs")
     parser.add_argument("--skill", default=None, help="Skill or IDE target filter (e.g. ml-memory, cursor)")
     parser.add_argument("--api-key", default=None, help="SlashML Cloud API key (or SLASHML_API_KEY)")

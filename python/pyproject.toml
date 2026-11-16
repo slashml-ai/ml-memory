@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slashml-memory"
-version = "1.0.12"
+version = "1.0.13"
 description = "Official HTTP Python SDK for / ml (https://api.slashml.ai)"
 readme = "README.md"
 requires-python = ">=3.10"

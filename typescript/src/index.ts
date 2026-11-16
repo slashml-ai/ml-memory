@@ -605,7 +605,7 @@ export class MemoryClient {
     const headers: Record<string, string> = {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "User-Agent": "slashml-memory-ts/1.0.14",
+      "User-Agent": "slashml-memory-ts/1.0.15",
     };
     if (this.apiKey) {
       headers.Authorization = `Bearer ${this.apiKey}`;

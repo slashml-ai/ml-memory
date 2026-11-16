@@ -58,7 +58,7 @@ def _build_ssl_context() -> ssl.SSLContext:
 
 
 class _FastHTTPConnection(http.client.HTTPConnection):
-    """HTTP/1.1 keep-alive connection with TCP_NODELAY enabled to prevent 40ms Nagle/Delayed-ACK stalls."""
+    """Persistent HTTP/1.1 connection."""
 
     def connect(self) -> None:
         super().connect()
@@ -70,7 +70,7 @@ class _FastHTTPConnection(http.client.HTTPConnection):
 
 
 class _FastHTTPSConnection(http.client.HTTPSConnection):
-    """HTTPS/1.1 keep-alive connection with TCP_NODELAY enabled to prevent 40ms Nagle/Delayed-ACK stalls."""
+    """Persistent HTTPS/1.1 connection."""
 
     def connect(self) -> None:
         super().connect()
@@ -213,7 +213,7 @@ class MemoryClient:
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "slashml-python-sdk/1.0.12",
+            "User-Agent": "slashml-python-sdk/1.0.13",
             "X-SlashML-Model": self.model,
         }
         if self.api_key:
@@ -591,6 +591,8 @@ class MemoryClient:
         prompt: str | None = None,
         last_assistant_message: str | None = None,
         stop_hook_active: bool = False,
+        turn_blocked_memory_ids: list[str] | None = None,
+        stop_retry_count: int = 0,
         whispered_memory_ids: list[str] | None = None,
         overridden_memory_ids: list[str] | None = None,
         dismiss_memory_ids: list[str] | None = None,
@@ -676,6 +678,10 @@ class MemoryClient:
             payload["last_assistant_message"] = str(last_assistant_message)
         if stop_hook_active:
             payload["stop_hook_active"] = True
+        if turn_blocked_memory_ids:
+            payload["turn_blocked_memory_ids"] = [str(x) for x in turn_blocked_memory_ids if x]
+        if stop_retry_count > 0:
+            payload["stop_retry_count"] = int(stop_retry_count)
         if whispered_memory_ids:
             payload["whispered_memory_ids"] = [str(x) for x in whispered_memory_ids if x]
         if overridden_memory_ids:
