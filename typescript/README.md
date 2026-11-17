@@ -71,13 +71,13 @@ await client.forget("Refresh tokens expire after 7 days", {
 Install the `/ ml` MCP server into Cursor, Claude Code, or Windsurf:
 
 ```bash
-npx @slashml/memory --init --skill cursor --api-key "$SLASHML_API_KEY"
+npx -y @slashml/memory@latest --init --skill cursor --api-key "$SLASHML_API_KEY"
 ```
 
 Install ambient lifecycle hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`) into `~/.claude/settings.json`:
 
 ```bash
-npx @slashml/memory --install-hooks --api-key "$SLASHML_API_KEY"
+npx -y @slashml/memory@latest --install-hooks --api-key "$SLASHML_API_KEY"
 ```
 
 Or evaluate an agent action / prompt programmatically via `client.intervene()`:

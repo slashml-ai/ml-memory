@@ -167,7 +167,7 @@ def configure_mcp_targets(
         t for t in targets if is_generic or (norm_skill and norm_skill in str(t).lower())
     ]
 
-    args = ["-y", "@slashml/mcp"]
+    args = ["-y", "@slashml/mcp@latest"]
     if repo:
         args.extend(["--workspace", repo])
     server_entry: dict[str, Any] = {
@@ -707,7 +707,7 @@ class SlashMLMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": proto,
-                    "serverInfo": {"name": "ml-memory", "version": "1.0.13"},
+                    "serverInfo": {"name": "ml-memory", "version": "1.0.14"},
                     "capabilities": {"tools": {}},
                 },
             }
@@ -1175,7 +1175,7 @@ def install_ambient_hooks(
                 if not quiet or "ml-memory" not in opencode_cfg["mcp"]:
                     entry_cfg: dict[str, Any] = {
                         "type": "local",
-                        "command": ["npx", "-y", "@slashml/mcp"],
+                        "command": ["npx", "-y", "@slashml/mcp@latest"],
                         "enabled": True,
                     }
                     if api_key:
@@ -1939,7 +1939,7 @@ def main(
 ) -> int:
     parser = argparse.ArgumentParser(prog="slashml-mcp")
     parser.add_argument("command", nargs="?", default=None, help="Optional command (e.g. 'init')")
-    parser.add_argument("-v", "--version", action="version", version="1.0.13")
+    parser.add_argument("-v", "--version", action="version", version="1.0.14")
     parser.add_argument("--init", action="store_true", help="Configure ml-memory MCP in IDE configs")
     parser.add_argument("--skill", default=None, help="Skill or IDE target filter (e.g. ml-memory, cursor)")
     parser.add_argument("--api-key", default=None, help="SlashML Cloud API key (or SLASHML_API_KEY)")

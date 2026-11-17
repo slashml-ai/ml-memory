@@ -246,7 +246,7 @@ test("CLI --init writes /ml-memory MCP config to Cursor and Windsurf (including 
         );
         assert.ok(cursorCfg.mcpServers["ml-memory"]);
         assert.equal(cursorCfg.mcpServers["ml-memory"].env.SLASHML_API_KEY, "sml_init_test");
-        assert.deepEqual(cursorCfg.mcpServers["ml-memory"].args, ["-y", "@slashml/mcp", "--workspace", "/workspace/demo"]);
+        assert.deepEqual(cursorCfg.mcpServers["ml-memory"].args, ["-y", "@slashml/mcp@latest", "--workspace", "/workspace/demo"]);
 
         const windsurfCfg = JSON.parse(
           fs.readFileSync(path.join(tmpHome, ".codeium", "windsurf", "mcp_config.json"), "utf8")

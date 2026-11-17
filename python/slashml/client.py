@@ -213,7 +213,7 @@ class MemoryClient:
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "slashml-python-sdk/1.0.13",
+            "User-Agent": "slashml-python-sdk/1.0.14",
             "X-SlashML-Model": self.model,
         }
         if self.api_key:

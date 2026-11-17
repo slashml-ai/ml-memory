@@ -4,7 +4,7 @@
   "title": "SlashML (/ ml) Persistent Agent Memory, Redaction & Code Localization",
   "description": "Persistent memory, inline redaction, per-agent access, and code localization for AI agents.",
   "websiteUrl": "https://slashml.ai",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "icons": [
     {
       "src": "https://slashml.ai/icon.png",

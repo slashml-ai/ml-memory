@@ -1,6 +1,6 @@
 {
   "name": "@slashml/memory",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "Official HTTP TypeScript & Node.js SDK for / ml (https://api.slashml.ai)",
   "license": "Apache-2.0",
   "homepage": "https://slashml.ai",
